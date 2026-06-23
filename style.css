@@ -1,0 +1,212 @@
+/* ===================================================================
+ * EchoMusic Local Music Plugin - Styles
+ * 仿主应用歌曲列表布局 + 本地音乐专有样式
+ * =================================================================== */
+
+/* ---- Scrollbar ---- */
+.local-list::-webkit-scrollbar { width: 6px; }
+.local-list::-webkit-scrollbar-track { background: transparent; }
+.local-list::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.4); border-radius: 3px; }
+.local-list::-webkit-scrollbar-thumb:hover { background: rgba(128,128,128,0.6); }
+
+/* ---- Row Grid: 序号(40px) | 歌曲(1fr) | 标签(auto) | 时长(48px) ---- */
+.local-row-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 56px;
+  box-sizing: border-box;
+}
+
+/* ---- Row container ---- */
+.local-row {
+  width: 100%;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.local-row:hover {
+  background: var(--row-hover-bg);
+}
+
+/* 播放中的歌曲行（浅色背景） */
+.local-row.is-active {
+  background: var(--row-selected-bg);
+}
+
+.local-row.is-active .local-idx-icon {
+  color: var(--color-primary);
+}
+
+/* ---- Index Column ---- */
+.local-col-index {
+  width: 40px;
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+}
+
+.local-idx-cell {
+  position: relative;
+  width: 16px;
+  height: 16px;
+}
+
+.local-idx-num {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  opacity: 0.5;
+  color: var(--color-text-secondary);
+  transition: opacity 0.15s;
+}
+
+.local-row.is-active .local-idx-num {
+  display: none;
+}
+
+.local-row:hover .local-idx-num {
+  display: none;
+}
+
+.local-idx-play {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  opacity: 0;
+  transition: opacity 0.15s;
+  color: var(--color-text-main);
+  cursor: pointer;
+}
+
+.local-row:hover .local-idx-play {
+  opacity: 1;
+}
+
+.local-idx-icon {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--color-primary);
+}
+
+/* ---- Song Column (封面 + 歌曲信息) ---- */
+.local-col-song {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+/* ---- Cover ---- */
+.local-cover {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  flex-shrink: 0;
+  background: var(--bg-info-card, rgba(128,128,128,0.08));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.local-cover-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.local-cover-note {
+  opacity: 0.12;
+  color: var(--color-text-secondary);
+}
+
+/* ---- Song Info ---- */
+.local-song-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.local-song-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text-main);
+}
+
+.local-row.is-active .local-song-title {
+  color: var(--color-primary);
+}
+
+.local-song-artist {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text-secondary);
+}
+
+.local-row.is-active .local-song-artist {
+  color: var(--color-primary);
+  opacity: 0.65;
+}
+
+/* ---- Tags (歌词 / 别名) ---- */
+.local-tag-lyric {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-primary);
+  opacity: 0.5;
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  padding: 1px 5px;
+  border-radius: 4px;
+  line-height: 1.4;
+}
+
+.local-tag-album {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  opacity: 0.7;
+  background: color-mix(in srgb, var(--color-text-secondary) 8%, transparent);
+  padding: 2px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  line-height: 1.4;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.local-tag-alias {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--color-primary);
+  opacity: 0.55;
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  padding: 2px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  line-height: 1.4;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
