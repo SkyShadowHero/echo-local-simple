@@ -554,6 +554,18 @@ function browserPage(ctx, state, log) {
         ctx.dispose(() => _miuixObs.disconnect());
       });
       watch(() => state._tk, () => scan(true));
+      // 外部获取封面后触发 UI 更新
+      watch(() => state._coverRefresh, () => {
+        const all = songs.value;
+        let changed = false;
+        for (const sg of all) {
+          if (!sg.coverUrl && _coverCache.has(sg.id)) {
+            sg.coverUrl = _coverCache.get(sg.id);
+            changed = true;
+          }
+        }
+        if (changed) songs.value = all.slice();
+      });
 
       const scrollToTop = () => { const el = listEl.value; if (el) el.scrollTo({ top: 0, behavior: 'smooth' }); };
       const locateCurrent = () => {
@@ -726,7 +738,43 @@ export async function activate(ctx) {
       return null;
     },
   });
-  const state = ctx.vue.reactive({ _tk: 0 });
+  // 播放器自动切歌时也触发封面匹配
+  let _kugouLast = 0;
+  ctx.vue.watch(() => ctx.stores.player.currentTrackId, (id) => {
+    if (id == null || !_songs.length) return;
+    const now = Date.now();
+    if (now - _kugouLast < 800) return;
+    const sg = _songs.find(s => String(s.id) === String(id) || s.hash === String(id));
+    if (!sg || sg.coverUrl) return;
+    loadSettings(ctx).then(s => {
+      if (!s.useKugouCover) return;
+      _kugouLast = now;
+      const artist = sg.artist && sg.artist !== '未知歌手' ? sg.artist : '';
+      let keyword = artist ? artist + ' ' + sg.title : sg.title;
+      keyword = keyword.replace(/[&·•,()（）【】\[\]<>{}|\\/:*?"'`]/g, ' ').replace(/\s+/g, ' ').trim();
+      ctx.kugou.search.search(keyword, 'song', 1, 5).then(r => {
+        const lists = r?.data?.lists || r?.data?.list || r?.lists || [];
+        if (!lists.length) return;
+        const cu = formatPicUrl(lists[0].Image || lists[0].trans_param?.union_cover || lists[0].cover || '');
+        if (cu) {
+          sg.coverUrl = cu;
+          _coverCache.set(sg.id, cu);
+          state._coverRefresh = Date.now();
+          // 立即缓存到 song-cache.json
+          loadSettings(ctx).then(settings => {
+            const cacheDir = ctx.descriptor.directory;
+            ctx.fs.readTextFile(cacheDir + '/song-cache.json', { encoding: 'utf8' }).then(rr => {
+              if (!rr.ok) return;
+              const data = JSON.parse(rr.content);
+              const hit = data.songs.find(s => String(s.id) === sg.id);
+              if (hit) { hit.coverUrl = cu; ctx.fs.writeFile(cacheDir + '/song-cache.json', JSON.stringify(data), { overwrite: true }).catch(() => {}); }
+            }).catch(() => {});
+          });
+        }
+      }).catch(() => {});
+    });
+  });
+  const state = ctx.vue.reactive({ _tk: 0, _coverRefresh: 0 });
   ctx.ui.settings.define({ title: '本地音乐 设置', component: settingsPanel(ctx, state, log) });
   ctx.ui.addPage({ id: 'browser', title: '本地音乐', icon: 'material-symbols:folder-outline', component: browserPage(ctx, state, log), sidebar: { section: 'library', sectionTitle: '本地音乐', order: 10 } });
   log.info('就绪');
