@@ -141,6 +141,7 @@ function settingsPanel(ctx, state, log) {
       const folders = ref([]), showTag = ref(false);
       const showRm = ref(false), showEdit = ref(false), rmT = ref(null), editT = ref(null), aliasV = ref('');
       const useKugouCover = ref(false);
+      const isMiuix = ref(document.documentElement.classList.contains('miuix-bg-active'));
       loadSettings(ctx).then(s => { folders.value = s.folders; showTag.value = s.showTag; useKugouCover.value = !!s.useKugouCover; });
       const addFolder = async () => {
         const r = await ctx.dialog.selectDirectory({ title: '选择音乐文件夹' });
@@ -158,36 +159,40 @@ function settingsPanel(ctx, state, log) {
       const openEdit = (f) => { editT.value = f; aliasV.value = f.alias || ''; showEdit.value = true; };
       const setShowTag = async (v) => { showTag.value = v; await saveSettings(ctx, { folders: folders.value.slice(), showTag: showTag.value, useKugouCover: useKugouCover.value }); state._tk = Date.now(); };
       const setKugou = async (v) => { useKugouCover.value = v; await saveSettings(ctx, { folders: folders.value.slice(), showTag: showTag.value, useKugouCover: useKugouCover.value }); };
+      const _mc = isMiuix.value ? 'settings-card' : '';
+      const _mi = isMiuix.value ? 'settings-item' : '';
+      const _onBg = isMiuix.value ? 'var(--miuix-on-background)' : 'var(--color-text-main)';
+      const _onSec = isMiuix.value ? 'var(--miuix-on-background)' : 'var(--color-text-secondary)';
       return () => h('div', { style: 'display:flex;flex-direction:column;gap:8px;' }, [
-        h('div', { class:'settings-card', style:'border-radius:16px;overflow:hidden;width:100%' }, [
-          h('div', { class:'settings-item', style:'display:flex;justify-content:space-between;align-items:flex-start;gap:12px' }, [
+        h('div', { class:_mc, style: isMiuix.value ? 'border-radius:16px;overflow:hidden;width:100%' : 'width:100%' }, [
+          h('div', { class:_mi, style:'display:flex;justify-content:space-between;align-items:center;gap:12px' + (isMiuix.value ? '' : ';padding:10px 14px') }, [
             h('div', { style:'flex:1;min-width:0' }, [
-              h('div', { style:'font-weight:600;font-size:14px;color:var(--miuix-on-background, var(--color-text-main));line-height:1.4' }, '显示文件夹标签'),
-              h('div', { style:'font-size:12px;color:var(--miuix-on-background, var(--color-text-secondary));opacity:0.6;margin-top:2px;line-height:1.5' }, '在歌曲行右侧显示文件夹别名徽章'),
+              h('div', { style:'font-weight:600;font-size:14px;color:' + _onBg + ';line-height:1.4' }, '显示文件夹标签'),
+              h('div', { style:'font-size:12px;color:' + _onSec + ';opacity:0.6;margin-top:2px;line-height:1.5' }, '在歌曲行右侧显示文件夹别名徽章'),
             ]),
             h(Sw, { modelValue: showTag.value, 'onUpdate:modelValue': setShowTag }),
           ]),
-          h('div', { class:'settings-item', style:'display:flex;justify-content:space-between;align-items:flex-start;gap:12px' }, [
+          h('div', { class:_mi, style:'display:flex;justify-content:space-between;align-items:center;gap:12px' + (isMiuix.value ? '' : ';padding:10px 14px') }, [
             h('div', { style:'flex:1;min-width:0' }, [
-              h('div', { style:'font-weight:600;font-size:14px;color:var(--miuix-on-background, var(--color-text-main));line-height:1.4' }, '使用在线功能（封面/歌词等）'),
-              h('div', { style:'font-size:12px;color:var(--miuix-on-background, var(--color-text-secondary));opacity:0.6;margin-top:2px;line-height:1.5' }, '通过酷狗搜索匹配歌曲封面和歌词'),
+              h('div', { style:'font-weight:600;font-size:14px;color:' + _onBg + ';line-height:1.4' }, '使用在线功能（封面/歌词等）'),
+              h('div', { style:'font-size:12px;color:' + _onSec + ';opacity:0.6;margin-top:2px;line-height:1.5' }, '通过酷狗搜索匹配歌曲封面和歌词'),
             ]),
             h(Sw, { modelValue: useKugouCover.value, 'onUpdate:modelValue': setKugou }),
           ]),
-          h('div', { class:'settings-item', style:'display:flex;justify-content:space-between;align-items:flex-start;gap:12px' }, [
+          h('div', { class:_mi, style:'display:flex;justify-content:space-between;align-items:center;gap:12px' + (isMiuix.value ? '' : ';padding:10px 14px') }, [
             h('div', { style:'flex:1;min-width:0' }, [
-              h('div', { style:'font-weight:600;font-size:14px;color:var(--miuix-on-background);line-height:1.4' }, 'GitHub'),
-              h('div', { style:'font-size:12px;color:var(--miuix-on-background);opacity:0.6;margin-top:2px;line-height:1.5' }, '点击跳转 GitHub 地址，欢迎 Star'),
+              h('div', { style:'font-weight:600;font-size:14px;color:' + _onBg + ';line-height:1.4' }, 'GitHub'),
+              h('div', { style:'font-size:12px;color:' + _onSec + ';opacity:0.6;margin-top:2px;line-height:1.5' }, '点击跳转 GitHub 地址，欢迎 Star'),
             ]),
-            h(Btn, { class:'settings-button github-star', onClick: () => window.open('https://github.com/SkyShadowHero/echo-local-simple', '_blank') }, 'Github'),
+            h(Btn, { size:'xs', onClick: () => window.open('https://github.com/SkyShadowHero/echo-local-simple', '_blank') }, 'Github'),
           ]),
         ]),
-        h('div', { class:'settings-card', style:'border-radius:16px;overflow:hidden;width:100%' }, [
-          h('div', { class:'settings-item', style:'display:flex;align-items:center;justify-content:space-between;' }, [
-            h('span', { style:'font-weight:600;font-size:14px;color:var(--miuix-on-background, var(--color-text-main))' }, '音乐文件夹'),
+        h('div', { class:_mc, style: isMiuix.value ? 'border-radius:16px;overflow:hidden;width:100%' : 'width:100%' }, [
+          h('div', { class:_mi, style:'display:flex;align-items:center;justify-content:space-between;' + (isMiuix.value ? '' : ';padding:10px 14px') }, [
+            h('span', { style:'font-weight:600;font-size:14px;color:' + _onBg + '' }, '音乐文件夹'),
             h(Btn, { onClick: addFolder, size:'xs' }, { default:()=>'添加' }),
           ]),
-          folders.value.length > 0 ? folders.value.map((f) => h('div', { class: 'settings-item', key: f.path, style: 'display:flex;align-items:center;justify-content:space-between;gap:12px;' }, [
+          folders.value.length > 0 ? folders.value.map((f) => h('div', { class: _mi, key: f.path, style: 'display:flex;align-items:center;justify-content:space-between;gap:12px;' + (isMiuix.value ? '' : ';padding:10px 14px') }, [
             h('div', { style: 'flex:1;min-width:0;' }, [
               h('div', { style: 'display:flex;align-items:center;gap:6px;' }, [
                 h('span', { style: 'font-size:14px;font-weight:600;color:var(--color-text-main);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' }, f.alias || f.label),
