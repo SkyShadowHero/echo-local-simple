@@ -295,6 +295,8 @@
 .local-page-miuix {
   overflow-y: auto !important;
   height: 100%;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128,128,128,0.35) transparent;
 }
 .local-list.miuix-card {
   background: var(--miuix-background, var(--color-bg-primary));

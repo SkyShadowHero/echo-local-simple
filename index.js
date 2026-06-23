@@ -684,7 +684,7 @@ function browserPage(ctx, state, log) {
           t > 0 && h('div', { class: 'local-tab-root' + (isMiuix.value ? ' miuix' : '') }, [
             h('div', { class: 'local-tab-indicator', style: tabIndStyle.value.width
               ? Object.entries(tabIndStyle.value).map(([k,v]) => k + ':' + v).join(';')
-              : 'transform:translateX(0);width:30%;left:0;'
+              : isMiuix.value ? 'transform:translateX(5px);width:33.33%;' : 'transform:translateX(0);width:30%;left:0;'
             }),
             h('div', { class: 'local-tab-item' + (activeTab.value === 'songs' ? ' active' : ''), onClick: () => switchTab('songs') }, '歌曲'),
             h('div', { class: 'local-tab-item' + (activeTab.value === 'artists' ? ' active' : ''), onClick: () => switchTab('artists') }, '歌手'),
@@ -696,7 +696,7 @@ function browserPage(ctx, state, log) {
           // Song list / grouped list
           t>0 && h('div', { ref: listEl, class:'local-list' + (isMiuix.value ? ' miuix-card' : ''), style: isMiuix.value
             ? 'flex:none;overflow:visible;padding:4px 26px 0;position:relative;scrollbar-width:thin;scrollbar-color:rgba(128,128,128,0.35) transparent;'
-            : 'flex:1;min-height:0;overflow-y:scroll;scrollbar-width:thin;scrollbar-color:rgba(128,128,128,0.35) transparent;padding:8px 24px 24px;position:relative;'
+            : 'flex:1;min-height:0;overflow-y:scroll;scrollbar-width:thin;scrollbar-color:rgba(128,128,128,0.35) transparent;padding:8px 24px 100px;position:relative;'
           }, [_listContent()]),
         ]);
       };
