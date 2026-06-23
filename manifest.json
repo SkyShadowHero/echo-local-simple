@@ -2,7 +2,7 @@
   "id": "echo-local-simple",
   "name": "简单本地音乐",
   "version": "1.0.0",
-  "description": "简单实现的本地音乐播放(当前版本在设置里启用在线功能有百分百的风控可能)",
+  "description": "简单实现的本地音乐播放(支持在线匹配封面和歌词)",
   "author": "天影大侠",
   "icon": "icon.svg",
   "main": "index.js",

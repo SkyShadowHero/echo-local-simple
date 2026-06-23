@@ -7,6 +7,7 @@ function createLogger(ctx) {
 
 const STORAGE_KEY = 'echo-local-simple-settings';
 const _counts = {}; let _seq = 0; let _songs = [];
+const _coverCache = new Map(); // id → data:URL，内存封面缓存，跨页面导航持久化
 
 async function hashStr(s) { const d = new TextEncoder().encode(s); const h = await crypto.subtle.digest('SHA-256', d); return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2,'0')).join('').slice(0, 16); }
 
@@ -170,7 +171,6 @@ function settingsPanel(ctx, state, log) {
             h('div', { style:'flex:1;min-width:0' }, [
               h('div', { style:'font-weight:600;font-size:14px;color:var(--miuix-on-background, var(--color-text-main));line-height:1.4' }, '使用在线功能（封面/歌词等）'),
               h('div', { style:'font-size:12px;color:var(--miuix-on-background, var(--color-text-secondary));opacity:0.6;margin-top:2px;line-height:1.5' }, '通过酷狗搜索匹配歌曲封面和歌词'),
-              h('div', { style:'font-size:11px;color:var(--color-danger);margin-top:4px;line-height:1.4' }, '⚠ 有很大风控风险，请尽量少或不使用'),
             ]),
             h(Sw, { modelValue: useKugouCover.value, 'onUpdate:modelValue': setKugou }),
           ]),
@@ -332,67 +332,103 @@ function browserPage(ctx, state, log) {
                 }
               }
             } catch {}
-            if (changed) { songs.value = songs.value.slice(); saveSongCache(all, s); }
+            if (changed) { songs.value = songs.value.slice(); saveCache(all, s); }
           }
           songs.value = songs.value.slice();
           log.info('元数据完成: ' + all.length);
           
-          // 更新缓存（包含封面 URL）
-          saveSongCache(all, s);
+          // 更新缓存（元数据 + 独立封面文件）
+          saveCache(all, s);
           scanStatus.value = '';
 
-          // 酷狗在线匹配封面（开关控制）
-          const cfg = await loadSettings(ctx);
-          if (cfg.useKugouCover) {
-            runKugouMatch(all, s, all.filter((sg) => !sg.coverUrl));
-          } else { scanStatus.value = ''; }
+          scanStatus.value = '';
         })();
       };
       
-      const cachePath = ctx.descriptor.directory + '/song-cache.json';
-      
-      async function writeCache(data) {
-        try { await ctx.fs.writeFile(cachePath, JSON.stringify(data), { overwrite: true, createDirectories: true }); } catch {}
+      const cacheDir = ctx.descriptor.directory;
+      const metaPath = cacheDir + '/song-cache.json';
+
+      async function writeMeta(data) {
+        try { await ctx.fs.writeFile(metaPath, JSON.stringify(data), { overwrite: true, createDirectories: true }); } catch {}
       }
-      async function readCache() {
-        try { const r = await ctx.fs.readTextFile(cachePath, { encoding: 'utf8' }); if (r.ok) return JSON.parse(r.content); } catch {}
+      async function readMeta() {
+        try { const r = await ctx.fs.readTextFile(metaPath, { encoding: 'utf8' }); if (r.ok) return JSON.parse(r.content); } catch {}
         return null;
       }
-      
+
+      // ── 保存缓存（仅元数据，不缓存封面）──
       let _saveTimer = null;
-      function saveSongCache(all, s) {
+      function saveCache(all, settings) {
         clearTimeout(_saveTimer);
         _saveTimer = setTimeout(async () => {
-          const cacheFolders = s.folders.map(f => f.path).sort().join('|');
-          const cacheSongs = all.map(sg => ({ id:sg.id, title:sg.title, artist:sg.artist, album:sg.album, audioUrl:sg.audioUrl, hash:sg.hash, mixSongId:sg.mixSongId, source:sg.source, lyric:sg.lyric, _mt:sg._mt, _path:sg._path, _folder:sg._folder, _alias:sg._alias }));
-          await writeCache({ songs: cacheSongs, folderHash: await hashStr(cacheFolders), _seq });
-          // 单独存封面（避免大 JSON）
-          for (const sg of all) {
-            if (sg.coverUrl && /^(https?:\/\/|data:)/.test(sg.coverUrl)) {
-              ctx.storage.set('cover_' + sg.id, sg.coverUrl).catch(() => {});
-            }
-          }
-        }, 500);
+          const folderHash = await hashStr(settings.folders.map(f => f.path).sort().join('|'));
+          const meta = all.map(sg => ({
+            id: sg.id, title: sg.title, artist: sg.artist, album: sg.album,
+            audioUrl: sg.audioUrl, hash: sg.hash, mixSongId: sg.mixSongId,
+            source: sg.source, lyric: sg.lyric,
+            // 在线封面 URL（HTTP）很小，直接缓存在 JSON 里
+            coverUrl: sg.coverUrl && /^https?:\/\//.test(sg.coverUrl) ? sg.coverUrl : '',
+            _mt: sg._mt, _path: sg._path, _folder: sg._folder, _alias: sg._alias,
+          }));
+          writeMeta({ songs: meta, folderHash, _seq }).catch(() => {});
+          _saveTimer = null;
+        }, 300);
       }
-      
+
+      // ── 从缓存恢复 ──
       async function tryLoadCache() {
-        const s = await loadSettings(ctx);
-        if (!s.folders?.length) return false;
-        showTag.value = s.showTag;
-        folderList.value = s.folders.map((f) => ({ path: f.path, label: f.label, alias: f.alias || '' }));
-        const cacheFolders = s.folders.map(f => f.path).sort().join('|');
-        const cacheHash = await hashStr(cacheFolders);
-        const cache = await readCache();
-        if (!cache || cache.folderHash !== cacheHash) return false;
-        _seq = cache._seq || 0;
-        songs.value = cache.songs; _songs = cache.songs;
-        // 恢复单独存储的封面
-        for (const sg of cache.songs) {
-          if (!sg.coverUrl) {
-            ctx.storage.get('cover_' + sg.id).then(cu => { if (cu) { sg.coverUrl = cu; songs.value = songs.value.slice(); } }).catch(() => {});
-          }
+        const settings = await loadSettings(ctx);
+        if (!settings.folders?.length) return false;
+        showTag.value = settings.showTag;
+        folderList.value = settings.folders.map(f => ({ path: f.path, label: f.label, alias: f.alias || '' }));
+        const folderHash = await hashStr(settings.folders.map(f => f.path).sort().join('|'));
+        const meta = await readMeta();
+        if (!meta || meta.folderHash !== folderHash) return false;
+        _seq = meta._seq || 0;
+        songs.value = meta.songs; _songs = meta.songs;
+        // 后台从音频文件自动解析封面
+        loadCoversBg();
+        return true;
+      }
+
+      // ── 后台解析封面（从音频文件 ID3/FLAC 标签自动读取）──
+      async function loadCoversBg() {
+        const all = songs.value;
+        if (!all || !all.length) return;
+        scanPhase.value = 'parsing';
+        scanStatus.value = '解析封面中...';
+        const batchSize = 10;
+        for (let i = 0; i < all.length; i += batchSize) {
+          const batch = all.slice(i, i + batchSize);
+          const results = await Promise.all(batch.map(async sg => {
+            if (sg.coverUrl) return false;
+            const cached = _coverCache.get(sg.id);
+            if (cached) { sg.coverUrl = cached; return true; }
+            try {
+              const buf = await ctx.fs.readFileBytes(sg._path, { maxBytes: 2097152 });
+              if (buf.ok && buf.data) {
+                const u8 = new Uint8Array(buf.data);
+                const id3 = parseID3Meta(u8);
+                if (id3._isID3 && id3.coverUrl) {
+                  sg.coverUrl = id3.coverUrl;
+                  _coverCache.set(sg.id, id3.coverUrl);
+                  return true;
+                }
+                const flac = parseFlacMeta(u8);
+                if (flac.coverUrl) {
+                  sg.coverUrl = flac.coverUrl;
+                  _coverCache.set(sg.id, flac.coverUrl);
+                  return true;
+                }
+              }
+            } catch {}
+            return false;
+          }));
+          if (results.some(r => r)) songs.value = all.slice();
+          scanStatus.value = `解析封面中 ${Math.min(i + batchSize, all.length)}/${all.length}`;
         }
-        return cache.songs && cache.songs.length > 0;
+        scanPhase.value = '';
+        scanStatus.value = '';
       }
 
       const playAll = async () => {
@@ -404,42 +440,42 @@ function browserPage(ctx, state, log) {
         const l = list.value;
         const i = l.findIndex((s) => s.id === sg.id);
         try { await ctx.player.replaceQueueAndPlay(i >= 0 ? [...l.slice(i), ...l.slice(0, i)] : l, { requestedSong: sg }); log.info('播放: ' + sg.title); } catch (e) { log.error('播放失败: ' + e); ctx.toast.danger('播放失败'); }
+        // 播放时如果没封面且开启在线匹配，按需调酷狗（单首，不批量）
+        if (!sg.coverUrl) {
+          const settings = await loadSettings(ctx);
+          if (settings.useKugouCover) {
+            const ok = await enrichFromKugou(sg);
+            if (ok) { songs.value = songs.value.slice(); saveCache(songs.value, settings); }
+          }
+        }
       };
 
-      async function runKugouMatch(all, s, noCover) {
-        if (noCover.length === 0) { log.info('酷狗封面: 全部已有封面，跳过'); scanStatus.value = ''; return; }
-        scanPhase.value = 'kugou';
-        scanStatus.value = `在线匹配中 0/${noCover.length}`;
-        let enriched = 0, ki = 0;
-        for (const sg of noCover) {
-          ki++;
-
-          const artist = sg.artist && sg.artist !== '未知歌手' ? sg.artist : '';
-          let keyword = artist ? `${artist} ${sg.title}` : sg.title;
-          keyword = keyword.replace(/[&·•,()（）【】\[\]<>{}|\\/:*?"'`]/g, ' ').replace(/\s+/g, ' ').trim();
-          try {
-            const result = await ctx.kugou.search.search(keyword, 'song', 1, 5);
-            const lists = result?.data?.lists || result?.data?.list || result?.lists || [];
-            if (lists.length > 0) {
-              const match = lists[0];
-              const cu = formatPicUrl(match.Image || match.trans_param?.union_cover || match.cover || '');
-              if (cu) {
-                sg.coverUrl = cu; enriched++; songs.value = songs.value.slice();
-                fetch(cu).then(r => r.blob()).then(b => {
-                  const fr = new FileReader();
-                  fr.onload = () => { sg.coverUrl = fr.result; songs.value = songs.value.slice(); };
-                  fr.readAsDataURL(b);
-                }).catch(() => {});
-              }
+      // ── 单首歌曲酷狗匹配（仅播放时按需调用，避免批量触发风控）──
+      let _kugouLastCall = 0;
+      async function enrichFromKugou(sg) {
+        if (!sg || sg.coverUrl || !ctx.kugou) return false;
+        // 限流：每次调用间隔至少 800ms
+        const now = Date.now();
+        const wait = 800 - (now - _kugouLastCall);
+        if (wait > 0) await new Promise(r => setTimeout(r, wait));
+        _kugouLastCall = Date.now();
+        const artist = sg.artist && sg.artist !== '未知歌手' ? sg.artist : '';
+        let keyword = artist ? `${artist} ${sg.title}` : sg.title;
+        keyword = keyword.replace(/[&·•,()（）【】\[\]<>{}|\\/:*?"'`]/g, ' ').replace(/\s+/g, ' ').trim();
+        try {
+          const result = await ctx.kugou.search.search(keyword, 'song', 1, 5);
+          const lists = result?.data?.lists || result?.data?.list || result?.lists || [];
+          if (lists.length > 0) {
+            const match = lists[0];
+            const cu = formatPicUrl(match.Image || match.trans_param?.union_cover || match.cover || '');
+            if (cu) {
+              sg.coverUrl = cu;
+              _coverCache.set(sg.id, cu);
+              return true;
             }
-          } catch (e) { log.error(`酷狗搜索失败: ${sg.title} — ${e?.message || e}`); }
-          scanStatus.value = `在线匹配中 ${ki}/${noCover.length}`;
-        }
-        if (enriched > 0) { songs.value = songs.value.slice(); log.info(`酷狗封面: ${enriched}/${noCover.length}`); }
-        else { log.info(`酷狗封面: 0/${noCover.length} 未匹配到`); }
-        scanStatus.value = '';
-        scanPhase.value = '';
-        saveSongCache(all, s);
+          }
+        } catch (e) { log.error(`酷狗搜索失败: ${sg.title} — ${e?.message || e}`); }
+        return false;
       }
 
       const refresh = () => scan(false);
@@ -453,15 +489,6 @@ function browserPage(ctx, state, log) {
         }
         const hit = await tryLoadCache();
         if (!hit) { scan(true); return; }
-        const s = await loadSettings(ctx);
-        if (s.useKugouCover) {
-          const noCover = songs.value.filter(sg => !sg.coverUrl);
-          if (noCover.length > 0) {
-            scanPhase.value = 'kugou';
-            scanStatus.value = `在线匹配中 0/${noCover.length}`;
-            runKugouMatch(songs.value, s, noCover);
-          }
-        }
       });
       watch(() => state._tk, () => scan(true));
 
