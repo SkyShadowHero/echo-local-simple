@@ -1,7 +1,7 @@
 {
   "id": "echo-local-simple",
   "name": "简单本地音乐",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "简单实现的本地音乐播放(支持在线匹配封面和歌词)",
   "author": "天影大侠",
   "icon": "icon.svg",
