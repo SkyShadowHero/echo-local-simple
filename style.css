@@ -221,7 +221,19 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 .local-tab-root .local-tab-indicator {
-  display: none; /* 默认模式用 ::after，隐藏 JS 指示器 */
+  position: absolute;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--color-primary);
+  pointer-events: none;
+  z-index: 1;
+}
+.local-tab-root.transition-ready .local-tab-indicator {
+  transition: transform 0.2s ease, width 0.2s ease;
+}
+.local-tab-item.active::after {
+  display: none; /* 改用指示器 div，隐藏 ::after */
 }
 .local-tab-item {
   flex: 1;
@@ -269,9 +281,11 @@
   height: auto;
   border-radius: 8px;
   background: var(--miuix-background);
-  transition: transform 0.25s ease, width 0.25s ease;
   pointer-events: none;
   z-index: 1;
+}
+.local-tab-root.miuix.transition-ready .local-tab-indicator {
+  transition: transform 0.25s ease, width 0.25s ease;
 }
 .local-tab-root.miuix .local-tab-item.active::after {
   display: none; /* miuix 模式用滑块，隐藏下划线 */

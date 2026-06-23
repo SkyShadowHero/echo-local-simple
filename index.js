@@ -274,7 +274,8 @@ function browserPage(ctx, state, log) {
           const isMiuixMode = root.classList.contains('miuix');
           const w = isMiuixMode ? ar.width : Math.round(ar.width * 0.5);
           const x = isMiuixMode ? (ar.left - rr.left) : (ar.left - rr.left + Math.round(ar.width * 0.25));
-          tabIndStyle.value = { transform: 'translateX(' + x + 'px)', width: w + 'px' };
+          tabIndStyle.value = { transform: 'translateX(' + x + 'px)', width: w + 'px', opacity: '1' };
+          requestAnimationFrame(function() { root.classList.add('transition-ready'); });
         });
       }
       const scanPhase = ref(''); // '' | 'parsing' | 'kugou'
@@ -542,12 +543,16 @@ function browserPage(ctx, state, log) {
         if (_songs.length > 0) {
           songs.value = _songs;
           loading.value = false;
-          return;
+        } else {
+          const hit = await tryLoadCache();
+          if (!hit) { scan(true); }
         }
-        const hit = await tryLoadCache();
-        if (!hit) { scan(true); return; }
-        // 初始化 tab 指示器位置
+        // 初始化 tab 指示器位置（无论哪种路径都要执行）
         requestAnimationFrame(() => updateTabInd());
+        // 扫描完成后 tab 才渲染出来，需要再定位一次
+        watch(() => songs.value.length, () => {
+          if (songs.value.length > 0) requestAnimationFrame(() => updateTabInd());
+        });
         // 监听 miuix 插件动态启用/停用
         const _miuixObs = new MutationObserver(() => { isMiuix.value = document.documentElement.classList.contains('miuix-bg-active'); });
         _miuixObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
@@ -696,7 +701,7 @@ function browserPage(ctx, state, log) {
           t > 0 && h('div', { class: 'local-tab-root' + (isMiuix.value ? ' miuix' : '') }, [
             h('div', { class: 'local-tab-indicator', style: tabIndStyle.value.width
               ? Object.entries(tabIndStyle.value).map(([k,v]) => k + ':' + v).join(';')
-              : isMiuix.value ? 'transform:translateX(5px);width:33.33%;' : 'transform:translateX(0);width:30%;left:0;'
+              : isMiuix.value ? 'transform:translateX(5px);width:33.33%;opacity:0;' : 'transform:translateX(0);width:30%;left:0;opacity:0;'
             }),
             h('div', { class: 'local-tab-item' + (activeTab.value === 'songs' ? ' active' : ''), onClick: () => switchTab('songs') }, '歌曲'),
             h('div', { class: 'local-tab-item' + (activeTab.value === 'artists' ? ' active' : ''), onClick: () => switchTab('artists') }, '歌手'),
