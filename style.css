@@ -210,3 +210,104 @@
   text-overflow: ellipsis;
 }
 
+/* ── Tab 行 ── */
+/* 默认：简单文字 tab，自动计算宽度居中（CSS 伪元素，不依赖 JS） */
+.local-tab-root {
+  position: relative;
+  display: flex;
+  margin: 12px 24px 0;
+  flex-shrink: 0;
+  user-select: none;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.local-tab-root .local-tab-indicator {
+  display: none; /* 默认模式用 ::after，隐藏 JS 指示器 */
+}
+.local-tab-item {
+  flex: 1;
+  text-align: center;
+  padding: 10px 0 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  position: relative;
+  z-index: 2;
+  transition: color 0.15s;
+}
+.local-tab-item:hover {
+  color: var(--color-text-main);
+}
+.local-tab-item.active {
+  font-weight: 600;
+  color: var(--color-primary);
+}
+.local-tab-item.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 40%;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--color-primary);
+}
+/* Miuix 启用：卡片式 tab 行，使用 JS 滑块指示器 */
+.local-tab-root.miuix {
+  border-bottom: none;
+  background: var(--miuix-surface-elevated);
+  border-radius: 13px;
+  padding: 5px;
+  margin: 12px 24px 8px;
+}
+.local-tab-root.miuix .local-tab-indicator {
+  display: block;
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  height: auto;
+  border-radius: 8px;
+  background: var(--miuix-background);
+  transition: transform 0.25s ease, width 0.25s ease;
+  pointer-events: none;
+  z-index: 1;
+}
+.local-tab-root.miuix .local-tab-item.active::after {
+  display: none; /* miuix 模式用滑块，隐藏下划线 */
+}
+.local-tab-root.miuix .local-tab-item {
+  padding: 6px 0;
+  font-size: 13px;
+  border-radius: 8px;
+  color: rgba(128, 128, 128, 0.7);
+}
+.local-tab-root.miuix .local-tab-item:hover {
+  color: var(--miuix-on-background);
+}
+.local-tab-root.miuix .local-tab-item.active {
+  font-weight: 700;
+  color: var(--miuix-on-background);
+}
+
+/* ── Miuix 联动：大卡片模式 ── */
+/* 页面级滚动，卡片不固定高度，内容撑开 */
+.local-page-miuix {
+  overflow-y: auto !important;
+  height: 100%;
+}
+.local-list.miuix-card {
+  background: var(--miuix-background, var(--color-bg-primary));
+  border-radius: 16px;
+  padding: 0 !important;
+  margin: 16px 20px 100px;
+  overflow: hidden !important;
+}
+.local-list.miuix-card .local-row {
+  border-radius: 0;
+}
+/* Miuix 下分组卡片始终直角，无 hover 圆角 */
+.local-list.miuix-card .local-group-card {
+  border-radius: 0 !important;
+}
+

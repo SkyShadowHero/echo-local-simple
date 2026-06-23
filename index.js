@@ -242,6 +242,36 @@ function browserPage(ctx, state, log) {
       const filterFolder = ref('');
       const folderList = ref([]);
       const listEl = ref(null);
+      // 检测 miuix 插件是否启用（html 上有 miuix-bg-active 类）
+      const isMiuix = ref(document.documentElement.classList.contains('miuix-bg-active'));
+      const activeTab = ref('songs'); // 'songs' | 'artists' | 'albums'
+      const selectedGroup = ref(null); // { name, songs } 二级页面选中项
+      const tabIndStyle = ref({});
+      let _tabPending = false;
+      const ICON_BACK = '<path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z" fill="currentColor"/>';
+      function switchTab(tab) {
+        activeTab.value = tab;
+        selectedGroup.value = null;
+        if (tab !== 'songs' && sortBy.value === 'time') sortBy.value = 'name';
+        updateTabInd();
+      }
+      function updateTabInd() {
+        if (_tabPending) return;
+        _tabPending = true;
+        requestAnimationFrame(() => {
+          _tabPending = false;
+          const root = document.querySelector('.local-tab-root');
+          if (!root) return;
+          const active = root.querySelector('.local-tab-item.active');
+          if (!active) return;
+          const rr = root.getBoundingClientRect();
+          const ar = active.getBoundingClientRect();
+          const isMiuixMode = root.classList.contains('miuix');
+          const w = isMiuixMode ? ar.width : Math.round(ar.width * 0.5);
+          const x = isMiuixMode ? (ar.left - rr.left) : (ar.left - rr.left + Math.round(ar.width * 0.25));
+          tabIndStyle.value = { transform: 'translateX(' + x + 'px)', width: w + 'px' };
+        });
+      }
       const scanPhase = ref(''); // '' | 'parsing' | 'kugou'
       const scanStatus = ref('');
 
@@ -255,6 +285,24 @@ function browserPage(ctx, state, log) {
         else if (f === 'time') l = [...l].sort((a, b) => (b._mt || 0) - (a._mt || 0));
         return l;
       });
+      const artistGroups = computed(() => {
+        const map = {};
+        for (const sg of list.value) {
+          const key = sg.artist || '未知歌手';
+          if (!map[key]) map[key] = { name: key, songs: [] };
+          map[key].songs.push(sg);
+        }
+        return Object.values(map).sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+      });
+      const albumGroups = computed(() => {
+        const map = {};
+        for (const sg of list.value) {
+          const key = sg.album || sg._alias || '未知专辑';
+          if (!map[key]) map[key] = { name: key, songs: [] };
+          map[key].songs.push(sg);
+        }
+        return Object.values(map).sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+      });
 
       const folderOpts = computed(() => {
         const opts = [{ label: '全部文件夹', value: '' }];
@@ -263,6 +311,10 @@ function browserPage(ctx, state, log) {
       });
 
       const sortOps = [{ label: '按名称排序', value: 'name' }, { label: '按修改时间', value: 'time' }];
+      const currentSortOpts = computed(() => {
+        if (activeTab.value === 'songs') return sortOps;
+        return [{ label: '按名称排序', value: 'name' }, { label: '按数量排序', value: 'count' }];
+      });
 
       const scan = async (silent) => {
         const s = await loadSettings(ctx);
@@ -489,6 +541,12 @@ function browserPage(ctx, state, log) {
         }
         const hit = await tryLoadCache();
         if (!hit) { scan(true); return; }
+        // 初始化 tab 指示器位置
+        requestAnimationFrame(() => updateTabInd());
+        // 监听 miuix 插件动态启用/停用
+        const _miuixObs = new MutationObserver(() => { isMiuix.value = document.documentElement.classList.contains('miuix-bg-active'); });
+        _miuixObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+        ctx.dispose(() => _miuixObs.disconnect());
       });
       watch(() => state._tk, () => scan(true));
 
@@ -507,7 +565,84 @@ function browserPage(ctx, state, log) {
         const curId = ctx.stores.player.currentTrackId;
         const isPlaying = ctx.stores.player.isPlaying;
 
-        return h('div', { style: 'height:100%;display:flex;flex-direction:column;overflow:hidden;background:var(--color-bg-main);' }, [
+        // 歌曲行渲染函数（被三个 tab 共用）
+        const _songRow = (sg, idx) => {
+          const sid = String(sg.id);
+          const active = curId != null && String(curId) === sid;
+          const hasCover = !!sg.coverUrl;
+          const hasLyric = !!sg.lyric;
+          return h('div', { key: sg.id, class:'local-row group' + (active ? ' is-active' : ''), 'data-song-id': sid, onDblclick: () => playSong(sg) }, [
+            h('div', { class:'local-row-inner' }, [
+              h('div', { class:'local-col-index' }, [
+                h('div', { class:'local-idx-cell' }, [
+                  active ? h('svg', { class:'local-idx-icon', viewBox:'0 0 24 24', width:14, height:14, innerHTML: isPlaying ? ICON_PAUSE : ICON_PLAY, onClick:(e)=>{e.stopPropagation();ctx.player.toggle();} })
+                    : [ h('span',{class:'local-idx-num'},String(idx+1)), h('svg',{class:'local-idx-play',viewBox:'0 0 24 24',width:14,height:14,innerHTML:ICON_PLAY,onClick:(e)=>{e.stopPropagation();playSong(sg);}}) ],
+                ]),
+              ]),
+              h('div', { class:'local-col-song' }, [
+                h('div', { class:'local-cover' }, [
+                  hasCover ? h('img',{src:sg.coverUrl,class:'local-cover-img',alt:'cover',loading:'lazy',onError:(e)=>{e.target.style.display='none';e.target.nextSibling.style.display='flex';}}) : null,
+                  h('svg',{style:hasCover?'display:none;':'display:flex;',class:'local-cover-note',viewBox:'0 0 24 24',width:20,height:20,innerHTML:ICON_NOTE}),
+                ]),
+                h('div', { class:'local-song-info' }, [
+                  h('span',{class:'local-song-title'},sg.title),
+                  h('span',{class:'local-song-artist'},sg.artist),
+                ]),
+              ]),
+              hasLyric && h('span',{class:'local-tag-lyric'},'词'),
+              sg.album && sg.album !== sg._alias && h('span',{class:'local-tag-album'},sg.album),
+              showTag.value && sg._alias && h('span',{class:'local-tag-alias'},sg._alias),
+              h('span',{style:'width:16px;flex-shrink:0;'}),
+            ]),
+          ]);
+        };
+        // 分组项卡片（第一级：显示名称和数量，点击进入二级）
+        const _groupCard = (g) => h('div', {
+          key: g.name, class:'local-group-card', onClick: () => { selectedGroup.value = g; },
+          style: 'display:flex;align-items:center;justify-content:space-between;padding:14px 16px;cursor:pointer;border-radius:12px;transition:background 0.12s;',
+          onMouseenter: (e) => { e.currentTarget.style.background = 'var(--row-hover-bg)'; },
+          onMouseleave: (e) => { e.currentTarget.style.background = 'transparent'; },
+        }, [
+          h('span', { style:'font-size:14px;font-weight:600;color:var(--color-text-main);' }, g.name),
+          h('span', { style:'font-size:12px;color:var(--color-text-secondary);opacity:0.6;' }, g.songs.length + ' 首'),
+        ]);
+        const _sortGroups = (groups) => groups.slice().sort((a, b) =>
+          sortBy.value === 'count' ? b.songs.length - a.songs.length : a.name.localeCompare(b.name, 'zh')
+        );
+        // 根据 tab 渲染列表内容
+        const _listContent = () => {
+          if (activeTab.value === 'artists') {
+            if (selectedGroup.value) {
+              // 二级：该歌手的歌曲
+              return [
+                h('div', { key:'back', style:'display:flex;align-items:center;gap:8px;padding:8px 16px;cursor:pointer;font-size:14px;font-weight:600;color:var(--color-text-main);', onClick: () => { selectedGroup.value = null; } }, [
+                  h('svg', { viewBox:'0 0 24 24', width:20, height:20, innerHTML:ICON_BACK, style:'flex-shrink:0;' }),
+                  h('span', {}, selectedGroup.value.name),
+                ]),
+                ...selectedGroup.value.songs.map((sg, i) => _songRow(sg, i)),
+              ];
+            }
+            // 一级：歌手列表
+            return _sortGroups(artistGroups.value).map(g => _groupCard(g));
+          }
+          if (activeTab.value === 'albums') {
+            if (selectedGroup.value) {
+              // 二级：该专辑的歌曲
+              return [
+                h('div', { key:'back', style:'display:flex;align-items:center;gap:8px;padding:8px 16px;cursor:pointer;font-size:14px;font-weight:600;color:var(--color-text-main);', onClick: () => { selectedGroup.value = null; } }, [
+                  h('svg', { viewBox:'0 0 24 24', width:20, height:20, innerHTML:ICON_BACK, style:'flex-shrink:0;' }),
+                  h('span', {}, selectedGroup.value.name),
+                ]),
+                ...selectedGroup.value.songs.map((sg, i) => _songRow(sg, i)),
+              ];
+            }
+            // 一级：专辑列表
+            return _sortGroups(albumGroups.value).map(g => _groupCard(g));
+          }
+          return list.value.map((sg, idx) => _songRow(sg, idx));
+        };
+
+        return h('div', { class: isMiuix.value ? 'local-page-miuix' : '', style: 'height:100%;display:flex;flex-direction:column;overflow:hidden;background:var(--color-bg-main);' }, [
           // Header
           h('div', { style: 'flex-shrink:0;padding:16px 24px 0;display:flex;align-items:center;justify-content:space-between;gap:12px;' }, [
             h('div', { style: 'flex:1;min-width:0;' }, [
@@ -531,7 +666,7 @@ function browserPage(ctx, state, log) {
             ]),
             folderList.value.length > 1 && h(Sel, { options:folderOpts.value, modelValue:filterFolder.value, 'onUpdate:modelValue':(v)=>{filterFolder.value=String(v)}, clearable:false }),
             h('span', { style:'font-size:13px;color:var(--color-text-secondary);flex-shrink:0;' }, '排序：'),
-            h(Sel, { options:sortOps, modelValue:sortBy.value, 'onUpdate:modelValue':(v)=>{sortBy.value=String(v)}, clearable:false }),
+            h(Sel, { options:currentSortOpts.value, modelValue:sortBy.value, 'onUpdate:modelValue':(v)=>{sortBy.value=String(v)}, clearable:false }),
             h('div', { style:'flex:1;' }),
             h('button', { onClick: locateCurrent, title: '定位当前播放', style: 'width:28px;height:28px;border-radius:8px;border:1px solid var(--border-subtle);background:var(--color-bg-elevated);color:var(--color-text-secondary);cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;' },
               h('svg', { viewBox: '0 0 24 24', width: 14, height: 14, innerHTML: ICON_LOCATE })
@@ -540,76 +675,24 @@ function browserPage(ctx, state, log) {
               h('svg', { viewBox: '0 0 24 24', width: 14, height: 14, innerHTML: ICON_UP })
             ),
           ]),
+          // Tab row
+          t > 0 && h('div', { class: 'local-tab-root' + (isMiuix.value ? ' miuix' : '') }, [
+            h('div', { class: 'local-tab-indicator', style: tabIndStyle.value.width
+              ? Object.entries(tabIndStyle.value).map(([k,v]) => k + ':' + v).join(';')
+              : 'transform:translateX(0);width:30%;left:0;'
+            }),
+            h('div', { class: 'local-tab-item' + (activeTab.value === 'songs' ? ' active' : ''), onClick: () => switchTab('songs') }, '歌曲'),
+            h('div', { class: 'local-tab-item' + (activeTab.value === 'artists' ? ' active' : ''), onClick: () => switchTab('artists') }, '歌手'),
+            h('div', { class: 'local-tab-item' + (activeTab.value === 'albums' ? ' active' : ''), onClick: () => switchTab('albums') }, '专辑'),
+          ]),
           // Empty / loading states
           loading.value && t===0 && h('div', { class:'local-empty', style:'padding:60px 24px;text-align:center;font-size:13px;color:var(--color-text-secondary);' }, '正在扫描音乐文件...'),
           !loading.value && t===0 && h('div', { class:'local-empty', style:'padding:60px 24px;text-align:center;font-size:13px;color:var(--color-text-secondary);' }, '暂无歌曲，请在设置中添加文件夹'),
-          // Song list
-          t>0 && h('div', { ref: listEl, class:'local-list', style:'flex:1;min-height:0;overflow-y:scroll;scrollbar-width:thin;scrollbar-color:rgba(128,128,128,0.35) transparent;padding:8px 24px 200px;position:relative;' }, [
-            list.value.map((sg, idx) => {
-              const sid = String(sg.id);
-              const active = curId != null && String(curId) === sid;
-              const hasCover = !!sg.coverUrl;
-              const hasLyric = !!sg.lyric;
-
-              return h('div', {
-                key: sg.id,
-                class: 'local-row group' + (active ? ' is-active' : ''),
-                'data-song-id': sid,
-                onDblclick: () => playSong(sg),
-              }, [
-                h('div', { class: 'local-row-inner' }, [
-                  // 序号 / 播放状态
-                  h('div', { class: 'local-col-index' }, [
-                    h('div', { class: 'local-idx-cell' }, [
-                      active
-                        ? h('svg', {
-                            class: 'local-idx-icon',
-                            viewBox: '0 0 24 24', width: 14, height: 14,
-                            innerHTML: isPlaying ? ICON_PAUSE : ICON_PLAY,
-                            onClick: (e) => { e.stopPropagation(); ctx.player.toggle(); },
-                          })
-                        : [
-                            h('span', { class: 'local-idx-num' }, String(idx + 1)),
-                            h('svg', {
-                              class: 'local-idx-play',
-                              viewBox: '0 0 24 24', width: 14, height: 14,
-                              innerHTML: ICON_PLAY,
-                              onClick: (e) => { e.stopPropagation(); playSong(sg); },
-                            }),
-                          ],
-                    ]),
-                  ]),
-                  // 封面 + 歌曲信息
-                  h('div', { class: 'local-col-song' }, [
-                    h('div', { class: 'local-cover' }, [
-                      hasCover
-                        ? h('img', { src: sg.coverUrl, class: 'local-cover-img', alt: 'cover', loading: 'lazy',
-                            onError: (e) => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; } })
-                        : null,
-                      h('svg', {
-                        style: hasCover ? 'display:none;' : 'display:flex;',
-                        class: 'local-cover-note',
-                        viewBox: '0 0 24 24', width: 20, height: 20,
-                        innerHTML: ICON_NOTE,
-                      }),
-                    ]),
-                    h('div', { class: 'local-song-info' }, [
-                      h('span', { class: 'local-song-title' }, sg.title),
-                      h('span', { class: 'local-song-artist' }, sg.artist),
-                    ]),
-                  ]),
-                  // 歌词标签
-                  hasLyric && h('span', { class: 'local-tag-lyric' }, '词'),
-                  // 专辑标签
-                  sg.album && sg.album !== sg._alias && h('span', { class: 'local-tag-album' }, sg.album),
-                  // 别名标签
-                  showTag.value && sg._alias && h('span', { class: 'local-tag-alias' }, sg._alias),
-                  // 右间距
-                  h('span', { style: 'width:16px;flex-shrink:0;' }),
-                ]),
-              ]);
-            }),
-          ]),
+          // Song list / grouped list
+          t>0 && h('div', { ref: listEl, class:'local-list' + (isMiuix.value ? ' miuix-card' : ''), style: isMiuix.value
+            ? 'flex:none;overflow:visible;padding:4px 26px 0;position:relative;scrollbar-width:thin;scrollbar-color:rgba(128,128,128,0.35) transparent;'
+            : 'flex:1;min-height:0;overflow-y:scroll;scrollbar-width:thin;scrollbar-color:rgba(128,128,128,0.35) transparent;padding:8px 24px 24px;position:relative;'
+          }, [_listContent()]),
         ]);
       };
     },
