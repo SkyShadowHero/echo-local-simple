@@ -321,6 +321,49 @@
 .local-list.miuix-card .local-row {
   border-radius: 0;
 }
+/* Miuix 下顶部吸顶容器：背景与页面一致（颜色不变），滚动内容不会透出来 */
+.local-miuix-sticky {
+  background: var(--color-bg-main) !important;
+}
+
+/* 回到顶部：基础外观对齐主应用 BackToTop（absolute 右下角、圆形、半透明玻璃背景）。
+   带 .back-to-top-btn 类后 echo-liquid-glass 等插件会叠加自己的折射/描边/位移样式。
+   用 CSS animation 控制显隐过渡（不用 transition，避免被 echo-liquid-glass 的 transition !important 覆盖而闪现） */
+.back-to-top-btn {
+  position: absolute;
+  right: 24px;
+  bottom: 100px;
+  z-index: 1200;
+  padding: 12px;
+  border-radius: 50%;
+  border: 1px solid var(--control-border);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-main);
+  backdrop-filter: var(--surface-backdrop-filter);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-elevated, 0 4px 12px rgba(0,0,0,0.15));
+  opacity: 0;
+  transform: translateY(20px) scale(0.6);
+  pointer-events: none;
+  animation: local-fade-out 0.24s ease forwards;
+}
+.back-to-top-btn.lg-backtop-visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+  animation: local-fade-in 0.32s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes local-fade-in {
+  from { opacity: 0; transform: translateY(28px) scale(0.6); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes local-fade-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to   { opacity: 0; transform: translateY(20px) scale(0.5); }
+}
 /* Miuix 下分组卡片始终直角，无 hover 圆角 */
 .local-list.miuix-card .local-group-card {
   border-radius: 0 !important;

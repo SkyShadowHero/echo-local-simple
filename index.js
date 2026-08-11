@@ -229,7 +229,7 @@ function settingsPanel(ctx, state, log) {
 
 // ── 主页面 ──
 function browserPage(ctx, state, log) {
-  const { h, ref, computed, onMounted, watch, defineAsyncComponent: a } = ctx.vue;
+  const { h, ref, computed, onMounted, onUnmounted, watch, defineAsyncComponent: a } = ctx.vue;
   const Btn = a(ctx.ui.components.Button), Sel = a(ctx.ui.components.Select);
 
   // SVG icons (inline for simplicity)
@@ -550,7 +550,15 @@ function browserPage(ctx, state, log) {
         if (changed) songs.value = all.slice();
       });
 
-      const scrollToTop = () => { const el = listEl.value; if (el) el.scrollTo({ top: 0, behavior: 'smooth' }); };
+      const scrollToTop = () => {
+        const el = isMiuix.value ? document.querySelector('.local-page-miuix') : listEl.value;
+        if (el) el.scrollTo({ top: 0, behavior: 'smooth' });
+      };
+      const showBackToTop = ref(false);
+      const onListScroll = () => {
+        const el = isMiuix.value ? document.querySelector('.local-page-miuix') : listEl.value;
+        if (el) showBackToTop.value = el.scrollTop > 300;
+      };
       const locateCurrent = () => {
         const el = listEl.value;
         if (!el) return;
@@ -559,6 +567,19 @@ function browserPage(ctx, state, log) {
         const row = el.querySelector(`[data-song-id="${curId}"]`);
         if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
       };
+      let _scrollCleanup = null;
+      const _bindScroll = () => {
+        if (_scrollCleanup) { _scrollCleanup(); _scrollCleanup = null; }
+        const el = isMiuix.value ? document.querySelector('.local-page-miuix') : listEl.value;
+        if (!el) return;
+        el.addEventListener('scroll', onListScroll, { passive: true });
+        _scrollCleanup = () => el.removeEventListener('scroll', onListScroll);
+        onListScroll();
+      };
+      onMounted(() => { setTimeout(_bindScroll, 0); });
+      onUnmounted(() => { if (_scrollCleanup) _scrollCleanup(); });
+      watch(isMiuix, () => { setTimeout(_bindScroll, 0); });
+      watch(() => songs.value.length, () => { setTimeout(_bindScroll, 0); });
 
       return () => {
         const t = songs.value.length;
@@ -642,7 +663,8 @@ function browserPage(ctx, state, log) {
           return list.value.map((sg, idx) => _songRow(sg, idx));
         };
 
-        return h('div', { class: isMiuix.value ? 'local-page-miuix' : '', style: 'height:100%;display:flex;flex-direction:column;overflow:hidden;background:var(--color-bg-main);' }, [
+        // miuix 模式：顶部（Header+Toolbar+Tab）吸顶；非 miuix 顶部本就固定
+        const headerBlock = [
           // Header
           h('div', { style: 'flex-shrink:0;padding:16px 24px 0;display:flex;align-items:center;justify-content:space-between;gap:12px;' }, [
             h('div', { style: 'flex:1;min-width:0;' }, [
@@ -671,9 +693,6 @@ function browserPage(ctx, state, log) {
             h('button', { onClick: locateCurrent, title: '定位当前播放', style: 'width:28px;height:28px;border-radius:8px;border:1px solid var(--border-subtle);background:var(--color-bg-elevated);color:var(--color-text-secondary);cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;' },
               h('svg', { viewBox: '0 0 24 24', width: 14, height: 14, innerHTML: ICON_LOCATE })
             ),
-            h('button', { onClick: scrollToTop, title: '回到顶部', style: 'width:28px;height:28px;border-radius:50%;border:1px solid var(--border-subtle);background:var(--color-bg-elevated);color:var(--color-text-secondary);cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;' },
-              h('svg', { viewBox: '0 0 24 24', width: 14, height: 14, innerHTML: ICON_UP })
-            ),
           ]),
           // Tab row
           t > 0 && h('div', { class: 'local-tab-root' + (isMiuix.value ? ' miuix' : '') }, [
@@ -682,6 +701,13 @@ function browserPage(ctx, state, log) {
             h('div', { class: 'local-tab-item' + (activeTab.value === 'artists' ? ' active' : ''), onClick: () => switchTab('artists') }, '歌手'),
             h('div', { class: 'local-tab-item' + (activeTab.value === 'albums' ? ' active' : ''), onClick: () => switchTab('albums') }, '专辑'),
           ]),
+        ];
+
+        return h('div', { class: isMiuix.value ? 'local-page-miuix' : '', style: 'height:100%;display:flex;flex-direction:column;overflow:hidden;background:var(--color-bg-main);' }, [
+          // miuix：顶部吸顶（不设背景，保持原有颜色）；非 miuix：直接展开
+          isMiuix.value
+            ? h('div', { class: 'local-miuix-sticky', style: 'position:sticky;top:0;z-index:100;flex-shrink:0;' }, headerBlock)
+            : headerBlock,
           // Empty / loading states
           loading.value && t===0 && h('div', { class:'local-empty', style:'padding:60px 24px;text-align:center;font-size:13px;color:var(--color-text-secondary);' }, '正在扫描音乐文件...'),
           !loading.value && t===0 && h('div', { class:'local-empty', style:'padding:60px 24px;text-align:center;font-size:13px;color:var(--color-text-secondary);' }, '暂无歌曲，请在设置中添加文件夹'),
@@ -690,6 +716,16 @@ function browserPage(ctx, state, log) {
             ? 'flex:none;overflow:visible;padding:4px 26px 0;position:relative;scrollbar-width:thin;scrollbar-color:rgba(128,128,128,0.35) transparent;'
             : 'flex:1;min-height:0;overflow-y:scroll;scrollbar-width:thin;scrollbar-color:rgba(128,128,128,0.35) transparent;padding:8px 24px 100px;position:relative;'
           }, [_listContent()]),
+          // 回到顶部：类名与主应用 BackToTop 一致，让 echo-liquid-glass 等插件的 .back-to-top-btn 样式命中。
+          // 始终渲染 + class 控制显隐，CSS animation 提供进入/消失动画
+          h('button', {
+            onClick: scrollToTop,
+            title: '回到顶部',
+            class: 'back-to-top-btn' + (showBackToTop.value ? ' lg-backtop-visible' : ''),
+            'aria-label': '回到顶部',
+          }, [
+            h('svg', { viewBox: '0 0 24 24', width: 20, height: 20, innerHTML: ICON_UP }),
+          ]),
         ]);
       };
     },
