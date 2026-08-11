@@ -252,31 +252,13 @@ function browserPage(ctx, state, log) {
       const activeTab = ref('songs'); // 'songs' | 'artists' | 'albums'
       const selectedGroup = ref(null); // { name, songs } 二级页面选中项
       const tabIndStyle = ref({});
-      let _tabPending = false;
       const ICON_BACK = '<path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z" fill="currentColor"/>';
       function switchTab(tab) {
         activeTab.value = tab;
         selectedGroup.value = null;
         if (tab !== 'songs' && sortBy.value === 'time') sortBy.value = 'name';
-        updateTabInd();
-      }
-      function updateTabInd() {
-        if (_tabPending) return;
-        _tabPending = true;
-        requestAnimationFrame(() => {
-          _tabPending = false;
-          const root = document.querySelector('.local-tab-root');
-          if (!root) return;
-          const active = root.querySelector('.local-tab-item.active');
-          if (!active) return;
-          const rr = root.getBoundingClientRect();
-          const ar = active.getBoundingClientRect();
-          const isMiuixMode = root.classList.contains('miuix');
-          const w = isMiuixMode ? ar.width : Math.round(ar.width * 0.5);
-          const x = isMiuixMode ? (ar.left - rr.left) : (ar.left - rr.left + Math.round(ar.width * 0.25));
-          tabIndStyle.value = { transform: 'translateX(' + x + 'px)', width: w + 'px', opacity: '1' };
-          requestAnimationFrame(function() { root.classList.add('transition-ready'); });
-        });
+        const idx = tab === 'songs' ? 0 : tab === 'artists' ? 1 : 2;
+        tabIndStyle.value = { '--lg-tab-index': String(idx) };
       }
       const scanPhase = ref(''); // '' | 'parsing' | 'kugou'
       const scanStatus = ref('');
@@ -344,7 +326,7 @@ function browserPage(ctx, state, log) {
               const { artist, title } = parseFileName(a.name);
               const id = (++_seq).toString();
               const cachedCover = prevCovers.get(a.path) || '';
-              const sg = { id, title, artist, album: alias, duration: 0, coverUrl: cachedCover, audioUrl: a.url, hash: '', mixSongId: id, source: 'local-music', lyric: '', _mt: a.modifiedAt, _path: a.path, _folder: f.path, _alias: alias };
+              const sg = { id, title, artist, name: title, album: alias, duration: 0, coverUrl: cachedCover, audioUrl: a.url, hash: '', mixSongId: id, source: 'local-music', lyric: '', _mt: a.modifiedAt, _path: a.path, _folder: f.path, _alias: alias };
               sg._hashPromise = hashStr(a.path);
               const k = a.name.replace(/\.[^.]+$/, '').toLowerCase(); const lm = li.get(k);
               if (lm) { try { const l = await ctx.fs.readTextFile(lm.path, { encoding: 'utf8' }); if (l.ok) sg.lyric = l.content; } catch {} }
@@ -378,7 +360,7 @@ function browserPage(ctx, state, log) {
                 const u8 = new Uint8Array(buf.data);
                 const id3 = parseID3Meta(u8);
                 if (id3._isID3) {
-                  if (id3.title) { sg.title = id3.title; changed = true; }
+                  if (id3.title) { sg.title = id3.title; sg.name = id3.title; changed = true; }
                   if (id3.artist) { sg.artist = id3.artist; changed = true; }
                   if (id3.album) { sg.album = id3.album; changed = true; }
                   if (id3.coverUrl) { sg.coverUrl = id3.coverUrl; changed = true; }
@@ -421,7 +403,7 @@ function browserPage(ctx, state, log) {
         _saveTimer = setTimeout(async () => {
           const folderHash = await hashStr(settings.folders.map(f => f.path).sort().join('|'));
           const meta = all.map(sg => ({
-            id: sg.id, title: sg.title, artist: sg.artist, album: sg.album,
+            id: sg.id, title: sg.title, name: sg.name, artist: sg.artist, album: sg.album,
             audioUrl: sg.audioUrl, hash: sg.hash, mixSongId: sg.mixSongId,
             source: sg.source, lyric: sg.lyric,
             // 在线封面 URL（HTTP）很小，直接缓存在 JSON 里
@@ -444,6 +426,8 @@ function browserPage(ctx, state, log) {
         if (!meta || meta.folderHash !== folderHash) return false;
         _seq = meta._seq || 0;
         songs.value = meta.songs; _songs = meta.songs;
+        // 旧缓存可能没有 name 字段，补齐（播放栏标题读 name）
+        songs.value.forEach(function (s) { if (s && !s.name && s.title) s.name = s.title; });
         // 后台从音频文件自动解析封面
         loadCoversBg();
         return true;
@@ -547,12 +531,6 @@ function browserPage(ctx, state, log) {
           const hit = await tryLoadCache();
           if (!hit) { scan(true); }
         }
-        // 初始化 tab 指示器位置（无论哪种路径都要执行）
-        requestAnimationFrame(() => updateTabInd());
-        // 扫描完成后 tab 才渲染出来，需要再定位一次
-        watch(() => songs.value.length, () => {
-          if (songs.value.length > 0) requestAnimationFrame(() => updateTabInd());
-        });
         // 监听 miuix 插件动态启用/停用
         const _miuixObs = new MutationObserver(() => { isMiuix.value = document.documentElement.classList.contains('miuix-bg-active'); });
         _miuixObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
@@ -699,10 +677,7 @@ function browserPage(ctx, state, log) {
           ]),
           // Tab row
           t > 0 && h('div', { class: 'local-tab-root' + (isMiuix.value ? ' miuix' : '') }, [
-            h('div', { class: 'local-tab-indicator', style: tabIndStyle.value.width
-              ? Object.entries(tabIndStyle.value).map(([k,v]) => k + ':' + v).join(';')
-              : isMiuix.value ? 'transform:translateX(5px);width:33.33%;opacity:0;' : 'transform:translateX(0);width:30%;left:0;opacity:0;'
-            }),
+            h('div', { class: 'local-tab-indicator', style: { '--lg-tab-index': (tabIndStyle.value['--lg-tab-index'] != null ? tabIndStyle.value['--lg-tab-index'] : activeTab.value === 'songs' ? 0 : activeTab.value === 'artists' ? 1 : 2) } }),
             h('div', { class: 'local-tab-item' + (activeTab.value === 'songs' ? ' active' : ''), onClick: () => switchTab('songs') }, '歌曲'),
             h('div', { class: 'local-tab-item' + (activeTab.value === 'artists' ? ' active' : ''), onClick: () => switchTab('artists') }, '歌手'),
             h('div', { class: 'local-tab-item' + (activeTab.value === 'albums' ? ' active' : ''), onClick: () => switchTab('albums') }, '专辑'),

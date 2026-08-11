@@ -228,15 +228,19 @@
   background: var(--color-primary);
   pointer-events: none;
   z-index: 1;
+  width: calc(100% / 3);
+  transform: translateX(calc(var(--lg-tab-index, 0) * 100%));
+  transition: transform 0.2s ease;
 }
 .local-tab-root.transition-ready .local-tab-indicator {
-  transition: transform 0.2s ease, width 0.2s ease;
+  transition: transform 0.2s ease;
 }
 .local-tab-item.active::after {
   display: none; /* 改用指示器 div，隐藏 ::after */
 }
 .local-tab-item {
-  flex: 1;
+  flex: 1 1 0%;
+  min-width: 0;
   text-align: center;
   padding: 10px 0 8px;
   font-size: 14px;
@@ -254,18 +258,7 @@
   font-weight: 600;
   color: var(--color-primary);
 }
-.local-tab-item.active::after {
-  content: '';
-  position: absolute;
-  bottom: -1px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 40%;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--color-primary);
-}
-/* Miuix 启用：卡片式 tab 行，使用 JS 滑块指示器 */
+/* Miuix 启用：卡片式 tab 行，滑块指示器用 --lg-tab-index 定位 */
 .local-tab-root.miuix {
   border-bottom: none;
   background: var(--miuix-surface-elevated);
@@ -283,12 +276,16 @@
   background: var(--miuix-background);
   pointer-events: none;
   z-index: 1;
+  width: calc((100% - 10px) / 3);
+  /* 重置默认规则的 transform，避免与 left 叠加导致偏移 */
+  transform: none;
+  /* left 百分比相对容器宽度（指示器宽=item 宽），
+     index 加 1 平移一个 item 宽度，再补 5px 起始 padding */
+  left: calc(var(--lg-tab-index, 0) * ((100% - 10px) / 3) + 5px);
+  transition: left 0.25s ease;
 }
 .local-tab-root.miuix.transition-ready .local-tab-indicator {
-  transition: transform 0.25s ease, width 0.25s ease;
-}
-.local-tab-root.miuix .local-tab-item.active::after {
-  display: none; /* miuix 模式用滑块，隐藏下划线 */
+  transition: left 0.25s ease;
 }
 .local-tab-root.miuix .local-tab-item {
   padding: 6px 0;
@@ -311,6 +308,8 @@
   height: 100%;
   scrollbar-width: thin;
   scrollbar-color: rgba(128,128,128,0.35) transparent;
+  /* 滚动条独立占位：预留固定 gutter，滚动条出现/消失内容区宽度都不变 */
+  scrollbar-gutter: stable;
 }
 .local-list.miuix-card {
   background: var(--miuix-background, var(--color-bg-primary));
