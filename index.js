@@ -721,7 +721,7 @@ function browserPage(ctx, state, log) {
           h('button', {
             onClick: scrollToTop,
             title: '回到顶部',
-            class: 'back-to-top-btn' + (showBackToTop.value ? ' lg-backtop-visible' : ''),
+            class: 'back-to-top-btn local-back-top' + (showBackToTop.value ? ' lg-backtop-visible' : ''),
             'aria-label': '回到顶部',
           }, [
             h('svg', { viewBox: '0 0 24 24', width: 20, height: 20, innerHTML: ICON_UP }),
