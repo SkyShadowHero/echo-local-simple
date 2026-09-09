@@ -321,9 +321,80 @@
 .local-list.miuix-card .local-row {
   border-radius: 0;
 }
-/* Miuix 下顶部吸顶容器：背景与页面一致（颜色不变），滚动内容不会透出来 */
+/* Miuix 下顶部吸顶容器：采用与 Echo 内置吸顶表面相同的方案——
+   底色(::before)负责遮住滚动内容，氛围渐变切片(::after)按视口固定对齐，
+   让顶部渐变带连续穿过吸顶区，而不是被整块底色截断盖在遮罩上。 */
 .local-miuix-sticky {
-  background: var(--color-bg-main) !important;
+  isolation: isolate;
+  background: transparent !important;
+}
+
+.local-miuix-sticky::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  z-index: -1;
+  pointer-events: none;
+  background: var(--color-bg-main);
+}
+
+.local-miuix-sticky::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 100vw;
+  transform: translateX(-50%);
+  z-index: -1;
+  pointer-events: none;
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+  background-position: left top;
+  background-size: 100vw var(--accent-gradient-rendered-height, 70vh);
+  opacity: var(--accent-gradient-opacity, var(--accent-gradient-user-opacity, 1));
+  /* 与 Echo style.css 的 .layout-accent-gradient 共用同一套变量与渐变公式 */
+  --lg-agc: var(--accent-gradient-color-rgb, var(--color-atmosphere-rgb, var(--color-primary-rgb)));
+  --lg-agp: calc(0.32 * var(--accent-gradient-user-gain, 1));
+  --lg-agm: calc(0.127 * var(--accent-gradient-user-gain, 1));
+  background-image: var(
+    --accent-gradient-background,
+    linear-gradient(
+      var(--accent-gradient-angle, 180deg),
+      rgba(var(--lg-agc), var(--lg-agp)) 0%,
+      rgba(var(--lg-agc), calc(var(--lg-agp) * 0.94))
+        calc(var(--accent-gradient-mid-position, 55%) * 0.4),
+      rgba(var(--lg-agc), var(--lg-agm)) var(--accent-gradient-mid-position, 55%),
+      rgba(var(--lg-agc), calc(var(--lg-agm) * 0.3))
+        calc(
+          var(--accent-gradient-mid-position, 55%) +
+            (100% - var(--accent-gradient-mid-position, 55%)) * 0.56
+        ),
+      rgba(var(--lg-agc), 0) 100%
+    )
+  );
+}
+
+.dark .local-miuix-sticky::after {
+  --lg-agc: var(
+    --accent-gradient-color-rgb-dark,
+    var(--accent-gradient-color-rgb, var(--color-atmosphere-rgb, var(--color-primary-rgb)))
+  );
+  --lg-agp: calc(0.3 * var(--accent-gradient-user-gain, 1));
+  --lg-agm: calc(0.123 * var(--accent-gradient-user-gain, 1));
+}
+
+/* 透明窗口：与 Echo 一致隐藏渐变切片（底色保留，配合毛玻璃 backdrop-filter） */
+body.echo-surface-translucent .local-miuix-sticky {
+  -webkit-backdrop-filter: var(--surface-backdrop-filter);
+  backdrop-filter: var(--surface-backdrop-filter);
+}
+body.echo-surface-translucent .local-miuix-sticky::after,
+body.accent-gradient-disabled .local-miuix-sticky::after {
+  opacity: 0;
 }
 
 /* 回到顶部：仅作用于 local 页面（限定 .local-back-top，避免全局 .back-to-top-btn 规则
