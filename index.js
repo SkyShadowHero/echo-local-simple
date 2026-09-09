@@ -1,15 +1,119 @@
 // ── echo-local-simple ──
 
-function createLogger(ctx) {
-  const noop = () => {};
-  return { debug: noop, info: noop, warn: noop, error: noop };
+// 宿主未提供独立 ctx.log 接口，官方插件统一用 console 输出（见 EchoMusic 插件开发文档），
+// 加 [echo-local-simple] 前缀方便在 DevTools Console 中过滤
+function createLogger() {
+  const tag = '[echo-local-simple]';
+  return {
+    debug: (...a) => console.debug(tag, '[debug]', ...a),
+    info: (...a) => console.info(tag, '[info]', ...a),
+    warn: (...a) => console.warn(tag, '[warn]', ...a),
+    error: (...a) => console.error(tag, '[error]', ...a),
+  };
 }
 
 const STORAGE_KEY = 'echo-local-simple-settings';
 const _counts = {}; let _seq = 0; let _songs = [];
-const _coverCache = new Map(); // id → data:URL，内存封面缓存，跨页面导航持久化
+// 内存封面缓存（blob: / http(s) URL），跨页面导航持久化
+const _coverCache = new Map();
+// 已登记的内嵌封面 blob URL：path → { mt, url }。同一文件内容未变时复用同一
+// URL，被替换时才 revoke，避免每次扫描/启动都新建 object URL 造成泄漏
+const _blobCovers = new Map();
 
 async function hashStr(s) { const d = new TextEncoder().encode(s); const h = await crypto.subtle.digest('SHA-256', d); return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2,'0')).join('').slice(0, 16); }
+
+/** 统一设置歌曲封面：登记/复用/回收内嵌封面 blob URL */
+function applyCover(sg, url, mt) {
+  if (!url || sg.coverUrl === url) return;
+  const old = sg.coverUrl;
+  if (url.startsWith('blob:')) {
+    const ent = _blobCovers.get(sg._path);
+    if (ent && ent.mt === mt && ent.url !== url) {
+      // 同一文件（内容未变）被重复解析：丢弃新生成的重复 blob，复用已登记的
+      try { URL.revokeObjectURL(url); } catch {}
+      url = ent.url;
+    } else if (ent && ent.mt !== mt) {
+      // 文件已变更：旧 blob 失效，回收后登记新值
+      if (ent.url !== old) { try { URL.revokeObjectURL(ent.url); } catch {} }
+      _blobCovers.set(sg._path, { mt, url });
+    } else if (!ent) {
+      _blobCovers.set(sg._path, { mt, url });
+    }
+    if (old === url) return;
+  }
+  sg.coverUrl = url;
+  if (old && old !== url && old.startsWith('blob:')) { try { URL.revokeObjectURL(old); } catch {} }
+}
+
+// ── 元数据缓存（song-cache.json）──
+let _metaSaveTimer = null;
+const _metaCacheFile = (ctx) => ctx.descriptor.directory + '/song-cache.json';
+/** 防抖保存歌曲元数据缓存（仅持久化小体积字段：文本元数据 + http(s) 封面 URL + _noEmbed 标记） */
+function persistMetaCache(ctx, songs, folderPaths) {
+  clearTimeout(_metaSaveTimer);
+  _metaSaveTimer = setTimeout(async () => {
+    _metaSaveTimer = null;
+    try {
+      const folderHash = await hashStr(folderPaths.map(f => (typeof f === 'string' ? f : f?.path || '')).sort().join('|'));
+      const meta = songs.map(sg => ({
+        id: sg.id, title: sg.title, name: sg.name, artist: sg.artist, album: sg.album,
+        audioUrl: sg.audioUrl, hash: sg.hash, mixSongId: sg.mixSongId,
+        source: sg.source, lyric: sg.lyric,
+        // 内嵌封面是 blob URL，无法持久化；http(s) 在线封面很小，直接写入 JSON
+        coverUrl: sg.coverUrl && /^https?:\/\//.test(sg.coverUrl) ? sg.coverUrl : '',
+        _noEmbed: !!sg._noEmbed,
+        _mt: sg._mt, _path: sg._path, _folder: sg._folder, _alias: sg._alias,
+      }));
+      await ctx.fs.writeFile(_metaCacheFile(ctx), JSON.stringify({ songs: meta, folderHash, _seq }), { overwrite: true, createDirectories: true });
+    } catch {}
+  }, 300);
+}
+async function readMetaCache(ctx) {
+  try { const r = await ctx.fs.readTextFile(_metaCacheFile(ctx), { encoding: 'utf8' }); if (r.ok) return JSON.parse(r.content); } catch {}
+  return null;
+}
+
+// ── 酷狗封面匹配（单一实现 + 全局串行限流，供播放/切歌两处共用）──
+let _kugouChain = Promise.resolve();
+let _kugouLastTs = 0;
+function buildKugouKeyword(sg) {
+  const artist = sg.artist && sg.artist !== '未知歌手' ? sg.artist : '';
+  let keyword = artist ? `${artist} ${sg.title}` : sg.title;
+  return keyword.replace(/[&·•,()（）【】\[\]<>{}|\\/:*?"'`]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+/** 串行执行酷狗搜索并做 800ms 全局限流，命中返回封面 http(s) URL，否则返回 '' */
+function searchKugouCoverUrl(ctx, sg, log) {
+  const run = async () => {
+    if (sg.coverUrl) return ''; // 已被其它路径补上
+    const now = Date.now();
+    const wait = 800 - (now - _kugouLastTs);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    _kugouLastTs = Date.now();
+    try {
+      const keyword = buildKugouKeyword(sg);
+      if (!keyword) return '';
+      const result = await ctx.kugou.search.search(keyword, 'song', 1, 5);
+      const lists = result?.data?.lists || result?.data?.list || result?.lists || [];
+      const first = lists[0];
+      return formatPicUrl(first?.Image || first?.trans_param?.union_cover || first?.cover || '') || '';
+    } catch (e) { log?.error(`酷狗搜索失败: ${sg.title} — ${e?.message || e}`); return ''; }
+  };
+  const p = _kugouChain.then(run, run);
+  _kugouChain = p.catch(() => {});
+  return p;
+}
+/** 为单曲匹配酷狗封面：成功时写入 sg.coverUrl 与内存缓存，返回是否命中 */
+async function enrichCoverFromKugou(ctx, sg, log, settings) {
+  if (!sg || sg.coverUrl || !ctx.kugou) return false;
+  let s;
+  try { s = settings || (await loadSettings(ctx)); } catch { return false; }
+  if (!s.useKugouCover) return false;
+  const url = await searchKugouCoverUrl(ctx, sg, log);
+  if (!url) return false;
+  sg.coverUrl = url; // http(s) URL 无需登记，直接赋值
+  _coverCache.set(sg.id, url);
+  return true;
+}
 
 function parseFileName(name) {
   const b = (name.lastIndexOf('.') > 0 ? name.slice(0, name.lastIndexOf('.')) : name).replace(/^\d+\s*[.\-——]\s*/, '').trim();
@@ -154,7 +258,7 @@ function settingsPanel(ctx, state, log) {
         try { const res = await ctx.fs.listFiles(path, { recursive: true, kinds: ['audio', 'lyric'] }); const c = res.ok ? res.files.filter((f) => f.kind === 'audio').length : 0; _counts[path] = c; if (res.ok) ctx.toast.success(`已添加 (${c} 首)`); else ctx.toast.warning(`失败: ${res.error}`); } catch { _counts[path] = 0; ctx.toast.warning('异常'); }
         state._tk = Date.now();
       };
-      const confirmRm = async () => { if (!rmT.value) return; folders.value = folders.value.filter((f) => f.path !== rmT.value.path); showRm.value = false; rmT.value = null; await saveSettings(ctx, { folders: folders.value.slice(), showTag: showTag.value, useKugouCover: useKugouCover.value }); state._tk = Date.now(); ctx.toast.success('已移除'); };
+      const confirmRm = async () => { if (!rmT.value) return; const p = rmT.value.path; folders.value = folders.value.filter((f) => f.path !== p); delete _counts[p]; showRm.value = false; rmT.value = null; await saveSettings(ctx, { folders: folders.value.slice(), showTag: showTag.value, useKugouCover: useKugouCover.value }); state._tk = Date.now(); ctx.toast.success('已移除'); };
       const saveEdit = async () => { if (!editT.value) return; editT.value.alias = aliasV.value.trim(); showEdit.value = false; editT.value = null; await saveSettings(ctx, { folders: folders.value.slice(), showTag: showTag.value, useKugouCover: useKugouCover.value }); ctx.toast.success('别名已保存'); };
       const openEdit = (f) => { editT.value = f; aliasV.value = f.alias || ''; showEdit.value = true; };
       const setShowTag = async (v) => { showTag.value = v; await saveSettings(ctx, { folders: folders.value.slice(), showTag: showTag.value, useKugouCover: useKugouCover.value }); state._tk = Date.now(); };
@@ -314,6 +418,7 @@ function browserPage(ctx, state, log) {
         const prevCovers = new Map();
         for (const es of songs.value) { if (es.coverUrl) prevCovers.set(es._path, es.coverUrl); }
         const all = [];
+        const lyricTasks = [];
         for (const f of s.folders) {
           try {
             const r = await ctx.fs.listFiles(f.path, { recursive: true, kinds: ['audio', 'lyric'] });
@@ -329,91 +434,64 @@ function browserPage(ctx, state, log) {
               const sg = { id, title, artist, name: title, album: alias, duration: 0, coverUrl: cachedCover, audioUrl: a.url, hash: '', mixSongId: id, source: 'local-music', lyric: '', _mt: a.modifiedAt, _path: a.path, _folder: f.path, _alias: alias };
               sg._hashPromise = hashStr(a.path);
               const k = a.name.replace(/\.[^.]+$/, '').toLowerCase(); const lm = li.get(k);
-              if (lm) { try { const l = await ctx.fs.readTextFile(lm.path, { encoding: 'utf8' }); if (l.ok) sg.lyric = l.content; } catch {} }
+              // 歌词读取与目录遍历解耦，统一批量等待，避免逐首串行阻塞扫描
+              if (lm) lyricTasks.push(ctx.fs.readTextFile(lm.path, { encoding: 'utf8' }).then(l => { if (l?.ok) sg.lyric = l.content; }).catch(() => {}));
               all.push(sg);
             }
             _counts[f.path] = af.length;
           } catch {}
         }
-        // 等待所有 SHA-256 hash 计算完成
-        await Promise.all(all.map(sg => sg._hashPromise.then(h => { sg.hash = h; delete sg._hashPromise; })));
+        // 等待歌词读取与 SHA-256 hash 计算完成
+        await Promise.all([...lyricTasks, ...all.map(sg => sg._hashPromise.then(h => { sg.hash = h; delete sg._hashPromise; }))]);
         songs.value = all; _songs = all; loading.value = false;
         if (!silent && all.length) ctx.toast.success(`共 ${all.length} 首`);
         scanPhase.value = '';
 
-        // 异步加载 ID3 元数据和封面
+        // 异步加载 ID3/FLAC 元数据和封面（分批并发读文件头，替代逐首 50ms 串行等待）
         (async () => {
           scanPhase.value = 'parsing';
-          scanStatus.value = '获取封面中...';
-          let i = 0;
-          for (const sg of all) {
-            i++;
-            if (i > 1) await new Promise(r => setTimeout(r, 50));
-            scanStatus.value = `获取封面中 ${i}/${all.length}`;
-            let changed = false;
-            try {
-              const buf = await Promise.race([
-                ctx.fs.readFileBytes(sg._path, { maxBytes: 2097152 }),
-                new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000))
-              ]);
-              if (buf.ok && buf.data) {
-                const u8 = new Uint8Array(buf.data);
-                const id3 = parseID3Meta(u8);
-                if (id3._isID3) {
-                  if (id3.title) { sg.title = id3.title; sg.name = id3.title; changed = true; }
-                  if (id3.artist) { sg.artist = id3.artist; changed = true; }
-                  if (id3.album) { sg.album = id3.album; changed = true; }
-                  if (id3.coverUrl) { sg.coverUrl = id3.coverUrl; changed = true; }
-                  if (id3.lyric) { sg.lyric = id3.lyric; changed = true; }
-                } else {
-                  const flac = parseFlacMeta(u8);
-                  if (flac.coverUrl) { sg.coverUrl = flac.coverUrl; changed = true; }
-                  if (flac.lyric) { sg.lyric = flac.lyric; changed = true; }
+          scanStatus.value = '解析标签与封面中...';
+          const BATCH = 6;
+          for (let i = 0; i < all.length; i += BATCH) {
+            const batch = all.slice(i, i + BATCH);
+            const changedFlags = await Promise.all(batch.map(async (sg) => {
+              let changed = false, embedded = false;
+              try {
+                const buf = await Promise.race([
+                  ctx.fs.readFileBytes(sg._path, { maxBytes: 2097152 }),
+                  new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000))
+                ]);
+                if (buf.ok && buf.data) {
+                  const u8 = new Uint8Array(buf.data);
+                  const id3 = parseID3Meta(u8);
+                  if (id3._isID3) {
+                    if (id3.title) { sg.title = id3.title; sg.name = id3.title; changed = true; }
+                    if (id3.artist) { sg.artist = id3.artist; changed = true; }
+                    if (id3.album) { sg.album = id3.album; changed = true; }
+                    if (id3.coverUrl) { applyCover(sg, id3.coverUrl, sg._mt); changed = true; embedded = true; }
+                    if (id3.lyric) { sg.lyric = id3.lyric; changed = true; embedded = true; }
+                  } else {
+                    const flac = parseFlacMeta(u8);
+                    if (flac.coverUrl) { applyCover(sg, flac.coverUrl, sg._mt); changed = true; embedded = true; }
+                    if (flac.lyric) { sg.lyric = flac.lyric; changed = true; embedded = true; }
+                  }
                 }
-              }
-            } catch {}
-            if (changed) { songs.value = songs.value.slice(); saveCache(all, s); }
+              } catch {}
+              // 文件内既无封面也无内嵌歌词 → 打标记，下次启动跳过重复读取
+              if (!embedded) sg._noEmbed = true;
+              return changed;
+            }));
+            scanStatus.value = `解析标签与封面中 ${Math.min(i + BATCH, all.length)}/${all.length}`;
+            if (changedFlags.some(Boolean)) songs.value = songs.value.slice();
           }
           songs.value = songs.value.slice();
           log.info('元数据完成: ' + all.length);
-          
-          // 更新缓存（元数据 + 独立封面文件）
-          saveCache(all, s);
-          scanStatus.value = '';
-
+          // 更新缓存（元数据 + _noEmbed 标记）
+          persistMetaCache(ctx, all, s.folders);
+          scanPhase.value = '';
           scanStatus.value = '';
         })();
       };
-      
-      const cacheDir = ctx.descriptor.directory;
-      const metaPath = cacheDir + '/song-cache.json';
-
-      async function writeMeta(data) {
-        try { await ctx.fs.writeFile(metaPath, JSON.stringify(data), { overwrite: true, createDirectories: true }); } catch {}
-      }
-      async function readMeta() {
-        try { const r = await ctx.fs.readTextFile(metaPath, { encoding: 'utf8' }); if (r.ok) return JSON.parse(r.content); } catch {}
-        return null;
-      }
-
-      // ── 保存缓存（仅元数据，不缓存封面）──
-      let _saveTimer = null;
-      function saveCache(all, settings) {
-        clearTimeout(_saveTimer);
-        _saveTimer = setTimeout(async () => {
-          const folderHash = await hashStr(settings.folders.map(f => f.path).sort().join('|'));
-          const meta = all.map(sg => ({
-            id: sg.id, title: sg.title, name: sg.name, artist: sg.artist, album: sg.album,
-            audioUrl: sg.audioUrl, hash: sg.hash, mixSongId: sg.mixSongId,
-            source: sg.source, lyric: sg.lyric,
-            // 在线封面 URL（HTTP）很小，直接缓存在 JSON 里
-            coverUrl: sg.coverUrl && /^https?:\/\//.test(sg.coverUrl) ? sg.coverUrl : '',
-            _mt: sg._mt, _path: sg._path, _folder: sg._folder, _alias: sg._alias,
-          }));
-          writeMeta({ songs: meta, folderHash, _seq }).catch(() => {});
-          _saveTimer = null;
-        }, 300);
-      }
 
       // ── 从缓存恢复 ──
       async function tryLoadCache() {
@@ -422,7 +500,7 @@ function browserPage(ctx, state, log) {
         showTag.value = settings.showTag;
         folderList.value = settings.folders.map(f => ({ path: f.path, label: f.label, alias: f.alias || '' }));
         const folderHash = await hashStr(settings.folders.map(f => f.path).sort().join('|'));
-        const meta = await readMeta();
+        const meta = await readMetaCache(ctx);
         if (!meta || meta.folderHash !== folderHash) return false;
         _seq = meta._seq || 0;
         songs.value = meta.songs; _songs = meta.songs;
@@ -439,29 +517,39 @@ function browserPage(ctx, state, log) {
         if (!all || !all.length) return;
         scanPhase.value = 'parsing';
         scanStatus.value = '解析封面中...';
+        const settings = await loadSettings(ctx);
         const batchSize = 10;
+        let metaDirty = false;
         for (let i = 0; i < all.length; i += batchSize) {
           const batch = all.slice(i, i + batchSize);
           const results = await Promise.all(batch.map(async sg => {
             if (sg.coverUrl) return false;
+            // 上次扫描已确认文件内无内嵌封面/歌词 → 跳过重复读取
+            if (sg._noEmbed) return false;
             const cached = _coverCache.get(sg.id);
             if (cached) { sg.coverUrl = cached; return true; }
             try {
               const buf = await ctx.fs.readFileBytes(sg._path, { maxBytes: 2097152 });
               if (buf.ok && buf.data) {
                 const u8 = new Uint8Array(buf.data);
+                let cover = '';
                 const id3 = parseID3Meta(u8);
-                if (id3._isID3 && id3.coverUrl) {
-                  sg.coverUrl = id3.coverUrl;
-                  _coverCache.set(sg.id, id3.coverUrl);
+                if (id3._isID3) {
+                  cover = id3.coverUrl || '';
+                  if (id3.lyric && !sg.lyric) { sg.lyric = id3.lyric; metaDirty = true; }
+                }
+                if (!cover) {
+                  const flac = parseFlacMeta(u8);
+                  cover = flac.coverUrl || '';
+                  if (flac.lyric && !sg.lyric) { sg.lyric = flac.lyric; metaDirty = true; }
+                }
+                if (cover) {
+                  applyCover(sg, cover, sg._mt);
+                  _coverCache.set(sg.id, sg.coverUrl);
                   return true;
                 }
-                const flac = parseFlacMeta(u8);
-                if (flac.coverUrl) {
-                  sg.coverUrl = flac.coverUrl;
-                  _coverCache.set(sg.id, flac.coverUrl);
-                  return true;
-                }
+                // 再次确认文件内无封面/歌词 → 标记并持久化，避免下次启动再读
+                if (!sg._noEmbed) { sg._noEmbed = true; metaDirty = true; }
               }
             } catch {}
             return false;
@@ -469,6 +557,7 @@ function browserPage(ctx, state, log) {
           if (results.some(r => r)) songs.value = all.slice();
           scanStatus.value = `解析封面中 ${Math.min(i + batchSize, all.length)}/${all.length}`;
         }
+        if (metaDirty) persistMetaCache(ctx, all, settings.folders);
         scanPhase.value = '';
         scanStatus.value = '';
       }
@@ -483,42 +572,14 @@ function browserPage(ctx, state, log) {
         const i = l.findIndex((s) => s.id === sg.id);
         try { await ctx.player.replaceQueueAndPlay(i >= 0 ? [...l.slice(i), ...l.slice(0, i)] : l, { requestedSong: sg }); log.info('播放: ' + sg.title); } catch (e) { log.error('播放失败: ' + e); ctx.toast.danger('播放失败'); }
         // 播放时如果没封面且开启在线匹配，按需调酷狗（单首，不批量）
-        if (!sg.coverUrl) {
-          const settings = await loadSettings(ctx);
-          if (settings.useKugouCover) {
-            const ok = await enrichFromKugou(sg);
-            if (ok) { songs.value = songs.value.slice(); saveCache(songs.value, settings); }
-          }
-        }
-      };
-
-      // ── 单首歌曲酷狗匹配（仅播放时按需调用，避免批量触发风控）──
-      let _kugouLastCall = 0;
-      async function enrichFromKugou(sg) {
-        if (!sg || sg.coverUrl || !ctx.kugou) return false;
-        // 限流：每次调用间隔至少 800ms
-        const now = Date.now();
-        const wait = 800 - (now - _kugouLastCall);
-        if (wait > 0) await new Promise(r => setTimeout(r, wait));
-        _kugouLastCall = Date.now();
-        const artist = sg.artist && sg.artist !== '未知歌手' ? sg.artist : '';
-        let keyword = artist ? `${artist} ${sg.title}` : sg.title;
-        keyword = keyword.replace(/[&·•,()（）【】\[\]<>{}|\\/:*?"'`]/g, ' ').replace(/\s+/g, ' ').trim();
         try {
-          const result = await ctx.kugou.search.search(keyword, 'song', 1, 5);
-          const lists = result?.data?.lists || result?.data?.list || result?.lists || [];
-          if (lists.length > 0) {
-            const match = lists[0];
-            const cu = formatPicUrl(match.Image || match.trans_param?.union_cover || match.cover || '');
-            if (cu) {
-              sg.coverUrl = cu;
-              _coverCache.set(sg.id, cu);
-              return true;
-            }
+          if (await enrichCoverFromKugou(ctx, sg, log)) {
+            songs.value = songs.value.slice();
+            const s = await loadSettings(ctx);
+            persistMetaCache(ctx, songs.value, s.folders);
           }
-        } catch (e) { log.error(`酷狗搜索失败: ${sg.title} — ${e?.message || e}`); }
-        return false;
-      }
+        } catch (e) { log.error('在线封面匹配失败: ' + e); }
+      };
 
       const refresh = () => scan(false);
       const openSettings = () => { try { ctx.router.push('/main/settings/plugins'); } catch {} };
@@ -703,7 +764,9 @@ function browserPage(ctx, state, log) {
           ]),
         ];
 
-        return h('div', { class: isMiuix.value ? 'local-page-miuix' : '', style: 'height:100%;display:flex;flex-direction:column;overflow:hidden;background:var(--color-bg-main);' }, [
+        // 页面根不涂背景：EchoMusic 新版约定页面区域透明，让主画布与顶部氛围渐变
+        // （.layout-accent-gradient）透出；画布底色由宿主 .main-layout 提供
+        return h('div', { class: isMiuix.value ? 'local-page-miuix' : '', style: 'height:100%;display:flex;flex-direction:column;overflow:hidden;' }, [
           // miuix：顶部吸顶（不设背景，保持原有颜色）；非 miuix：直接展开
           isMiuix.value
             ? h('div', { class: 'local-miuix-sticky', style: 'position:sticky;top:0;z-index:100;flex-shrink:0;' }, headerBlock)
@@ -733,7 +796,7 @@ function browserPage(ctx, state, log) {
 }
 
 export async function activate(ctx) {
-  const log = createLogger(ctx);
+  const log = createLogger();
   log.info('启动');
   ctx.player.audioSource.register({ id: 'local-simple-resolver', match: (c) => c.track.source === 'local-music', resolve: (c) => c.track.audioUrl || null });
   // 拦截歌词请求：本地音乐直接返回本地歌词
@@ -754,45 +817,30 @@ export async function activate(ctx) {
       return null;
     },
   });
-  // 播放器自动切歌时也触发封面匹配
-  let _kugouLast = 0;
-  ctx.vue.watch(() => ctx.stores.player.currentTrackId, (id) => {
-    if (id == null || !_songs.length) return;
-    const now = Date.now();
-    if (now - _kugouLast < 800) return;
-    const sg = _songs.find(s => String(s.id) === String(id) || s.hash === String(id));
-    if (!sg || sg.coverUrl) return;
-    loadSettings(ctx).then(s => {
-      if (!s.useKugouCover) return;
-      _kugouLast = now;
-      const artist = sg.artist && sg.artist !== '未知歌手' ? sg.artist : '';
-      let keyword = artist ? artist + ' ' + sg.title : sg.title;
-      keyword = keyword.replace(/[&·•,()（）【】\[\]<>{}|\\/:*?"'`]/g, ' ').replace(/\s+/g, ' ').trim();
-      ctx.kugou.search.search(keyword, 'song', 1, 5).then(r => {
-        const lists = r?.data?.lists || r?.data?.list || r?.lists || [];
-        if (!lists.length) return;
-        const cu = formatPicUrl(lists[0].Image || lists[0].trans_param?.union_cover || lists[0].cover || '');
-        if (cu) {
-          sg.coverUrl = cu;
-          _coverCache.set(sg.id, cu);
-          state._coverRefresh = Date.now();
-          // 立即缓存到 song-cache.json
-          loadSettings(ctx).then(settings => {
-            const cacheDir = ctx.descriptor.directory;
-            ctx.fs.readTextFile(cacheDir + '/song-cache.json', { encoding: 'utf8' }).then(rr => {
-              if (!rr.ok) return;
-              const data = JSON.parse(rr.content);
-              const hit = data.songs.find(s => String(s.id) === sg.id);
-              if (hit) { hit.coverUrl = cu; ctx.fs.writeFile(cacheDir + '/song-cache.json', JSON.stringify(data), { overwrite: true }).catch(() => {}); }
-            }).catch(() => {});
-          });
-        }
-      }).catch(() => {});
-    });
+  // 播放器自动切歌时也触发封面匹配（与页面播放共用同一限流/匹配逻辑）
+  ctx.vue.watch(() => ctx.stores.player.currentTrackId, async (id) => {
+    try {
+      if (id == null || !_songs.length) return;
+      const sg = _songs.find(s => String(s.id) === String(id) || s.hash === String(id));
+      if (!sg || sg.coverUrl) return;
+      if (await enrichCoverFromKugou(ctx, sg, log)) {
+        state._coverRefresh = Date.now(); // 通知页面刷新 UI
+        const s = await loadSettings(ctx);
+        persistMetaCache(ctx, _songs, s.folders);
+      }
+    } catch (e) { log.error('切歌封面匹配失败: ' + e); }
   });
   const state = ctx.vue.reactive({ _tk: 0, _coverRefresh: 0 });
   ctx.ui.settings.define({ title: '本地音乐 设置', component: settingsPanel(ctx, state, log) });
   ctx.ui.addPage({ id: 'browser', title: '本地音乐', icon: 'material-symbols:folder-outline', component: browserPage(ctx, state, log), sidebar: { section: 'library', sectionTitle: '本地音乐', order: 10 } });
   log.info('就绪');
 }
-export async function deactivate() {}
+export async function deactivate() {
+  // 回收本插件生成的内嵌封面 blob URL（其它资源随插件卸载自动清理）
+  if (_metaSaveTimer) { clearTimeout(_metaSaveTimer); _metaSaveTimer = null; }
+  for (const { url } of _blobCovers.values()) { try { URL.revokeObjectURL(url); } catch {} }
+  _blobCovers.clear();
+  _coverCache.clear();
+  _songs = [];
+  for (const k in _counts) delete _counts[k];
+}
