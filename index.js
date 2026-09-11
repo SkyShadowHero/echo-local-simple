@@ -612,12 +612,13 @@ function browserPage(ctx, state, log) {
       });
 
       const scrollToTop = () => {
-        const el = isMiuix.value ? document.querySelector('.local-page-miuix') : listEl.value;
+        // 两种模式下滚动容器都是列表本身（miuix 不再用页面级滚动）
+        const el = listEl.value;
         if (el) el.scrollTo({ top: 0, behavior: 'smooth' });
       };
       const showBackToTop = ref(false);
       const onListScroll = () => {
-        const el = isMiuix.value ? document.querySelector('.local-page-miuix') : listEl.value;
+        const el = listEl.value;
         if (el) showBackToTop.value = el.scrollTop > 300;
       };
       const locateCurrent = () => {
@@ -631,7 +632,7 @@ function browserPage(ctx, state, log) {
       let _scrollCleanup = null;
       const _bindScroll = () => {
         if (_scrollCleanup) { _scrollCleanup(); _scrollCleanup = null; }
-        const el = isMiuix.value ? document.querySelector('.local-page-miuix') : listEl.value;
+        const el = listEl.value;
         if (!el) return;
         el.addEventListener('scroll', onListScroll, { passive: true });
         _scrollCleanup = () => el.removeEventListener('scroll', onListScroll);
@@ -767,18 +768,24 @@ function browserPage(ctx, state, log) {
         // 页面根不涂背景：EchoMusic 新版约定页面区域透明，让主画布与顶部氛围渐变
         // （.layout-accent-gradient）透出；画布底色由宿主 .main-layout 提供
         return h('div', { class: isMiuix.value ? 'local-page-miuix' : '', style: 'height:100%;display:flex;flex-direction:column;overflow:hidden;' }, [
-          // miuix：顶部吸顶（不设背景，保持原有颜色）；非 miuix：直接展开
-          isMiuix.value
-            ? h('div', { class: 'local-miuix-sticky', style: 'position:sticky;top:0;z-index:100;flex-shrink:0;' }, headerBlock)
-            : headerBlock,
+          // 顶部区块固定不吸顶、也不涂任何底色：列表在下方独立滚动，
+          // 内容不会滚到它后面（与普通样式一致）
+          headerBlock,
           // Empty / loading states
           loading.value && t===0 && h('div', { class:'local-empty', style:'padding:60px 24px;text-align:center;font-size:13px;color:var(--color-text-secondary);' }, '正在扫描音乐文件...'),
           !loading.value && t===0 && h('div', { class:'local-empty', style:'padding:60px 24px;text-align:center;font-size:13px;color:var(--color-text-secondary);' }, '暂无歌曲，请在设置中添加文件夹'),
           // Song list / grouped list
-          t>0 && h('div', { ref: listEl, class:'local-list' + (isMiuix.value ? ' miuix-card' : ''), style: isMiuix.value
-            ? 'flex:none;overflow:visible;padding:4px 26px 0;position:relative;scrollbar-width:thin;scrollbar-color:rgba(128,128,128,0.35) transparent;'
+          // miuix：列表区域本身是（透明）滚动容器，里面是白色大卡片 + 卡片后面的滚动留白；
+          // 留白在卡片外侧、且属于可滚动内容，滚到最下面才会露出来
+          t>0 && h('div', { ref: listEl, class:'local-list' + (isMiuix.value ? ' miuix-scroll' : ''), style: isMiuix.value
+            ? 'flex:1;min-height:0;overflow-y:auto;scrollbar-width:thin;scrollbar-color:rgba(128,128,128,0.35) transparent;position:relative;'
             : 'flex:1;min-height:0;overflow-y:scroll;scrollbar-width:thin;scrollbar-color:rgba(128,128,128,0.35) transparent;padding:8px 24px 100px;position:relative;'
-          }, [_listContent()]),
+          }, isMiuix.value
+            ? [
+                h('div', { class:'miuix-card', key:'card' }, [_listContent()]),
+                h('div', { class:'miuix-card-bottom-space', key:'bottom-space' }),
+              ]
+            : [_listContent()]),
           // 回到顶部：类名与主应用 BackToTop 一致，让 echo-liquid-glass 等插件的 .back-to-top-btn 样式命中。
           // 始终渲染 + class 控制显隐，CSS animation 提供进入/消失动画
           h('button', {
