@@ -334,7 +334,9 @@
 .local-back-top {
   position: absolute;
   right: 24px;
-  bottom: 100px;
+  /* 与悬浮底栏统一：跟随宿主发布的底栏高度（--drawer-bottom-offset = 底栏高度 + 8）再加间距，
+     避免回顶按钮被底部播放控件遮挡 */
+  bottom: calc(var(--drawer-bottom-offset, 96px) + 24px);
   z-index: 1200;
   padding: 12px;
   border-radius: 50%;
