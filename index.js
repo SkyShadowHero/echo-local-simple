@@ -246,7 +246,7 @@ function settingsPanel(ctx, state, log) {
       const folders = ref([]), showTag = ref(false);
       const showRm = ref(false), showEdit = ref(false), rmT = ref(null), editT = ref(null), aliasV = ref('');
       const useKugouCover = ref(false);
-      const isMiuix = ref(document.documentElement.classList.contains('miuix-bg-active'));
+      const isMiuix = ref(document.documentElement.classList.contains('miuix-theme-active'));
       loadSettings(ctx).then(s => { folders.value = s.folders; showTag.value = s.showTag; useKugouCover.value = !!s.useKugouCover; });
       const addFolder = async () => {
         const r = await ctx.dialog.selectDirectory({ title: '选择音乐文件夹' });
@@ -365,7 +365,7 @@ function browserPage(ctx, state, log) {
       const folderList = ref([]);
       const listEl = ref(null);
       // 检测 miuix 插件是否启用（html 上有 miuix-bg-active 类）
-      const isMiuix = ref(document.documentElement.classList.contains('miuix-bg-active'));
+      const isMiuix = ref(document.documentElement.classList.contains('miuix-theme-active'));
       const activeTab = ref('songs'); // 'songs' | 'artists' | 'albums'
       const selectedGroup = ref(null); // { name, songs } 二级页面选中项
       const tabIndStyle = ref({});
@@ -611,7 +611,7 @@ function browserPage(ctx, state, log) {
           if (!hit) { scan(true); }
         }
         // 监听 miuix 插件动态启用/停用
-        const _miuixObs = new MutationObserver(() => { isMiuix.value = document.documentElement.classList.contains('miuix-bg-active'); });
+        const _miuixObs = new MutationObserver(() => { isMiuix.value = document.documentElement.classList.contains('miuix-theme-active'); });
         _miuixObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
         ctx.dispose(() => _miuixObs.disconnect());
       });

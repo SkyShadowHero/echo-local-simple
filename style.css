@@ -219,6 +219,8 @@
   flex-shrink: 0;
   user-select: none;
   border-bottom: 1px solid var(--border-subtle);
+  width: fit-content;
+  margin-right: auto;
 }
 .local-tab-root .local-tab-indicator {
   position: absolute;
@@ -239,7 +241,7 @@
   display: none; /* 改用指示器 div，隐藏 ::after */
 }
 .local-tab-item {
-  flex: 1 1 0%;
+  flex: 0 0 76px;
   min-width: 0;
   text-align: center;
   padding: 10px 0 8px;
@@ -265,6 +267,8 @@
   border-radius: 13px;
   padding: 5px;
   margin: 12px 24px 8px;
+  width: fit-content;
+  margin-right: auto;
 }
 .local-tab-root.miuix .local-tab-indicator {
   display: block;
@@ -288,6 +292,7 @@
   transition: left 0.25s ease;
 }
 .local-tab-root.miuix .local-tab-item {
+  flex: 0 0 76px;
   padding: 6px 0;
   font-size: 13px;
   border-radius: 8px;
