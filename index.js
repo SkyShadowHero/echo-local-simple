@@ -46,6 +46,34 @@ function applyCover(sg, url, mt) {
   if (old && old !== url && old.startsWith('blob:')) { try { URL.revokeObjectURL(old); } catch {} }
 }
 
+/** 内嵌封面落盘缓存：写入 <dir>/covers/<hash>.img，用文件 URL，避免每次重读音频文件 */
+async function applyEmbeddedCover(ctx, sg, blobUrl, mt) {
+  if (!blobUrl) return;
+  try {
+    const key = await hashStr(sg._path + ':' + mt);
+    const file = ctx.descriptor.directory + '/cover-cache/' + key + '.img';
+    const res = await fetch(blobUrl);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    await ctx.fs.writeFile(file, bytes, { overwrite: true, createDirectories: true });
+    const u = await ctx.fs.getFileUrl(file);
+    const url = u && u.ok ? u.url : blobUrl;
+    sg._coverFile = file;
+    applyCover(sg, url, mt);
+    if (url !== blobUrl) { try { URL.revokeObjectURL(blobUrl); } catch {} }
+    return;
+  } catch {}
+  applyCover(sg, blobUrl, mt);
+}
+
+/** 从落盘缓存恢复封面文件 URL（避免读音频文件） */
+async function restoreCoverFile(ctx, sg) {
+  if (!sg || !sg._coverFile || sg.coverUrl) return;
+  try {
+    const u = await ctx.fs.getFileUrl(sg._coverFile);
+    if (u && u.ok && u.url) { sg.coverUrl = u.url; _coverCache.set(sg.id, u.url); }
+  } catch {}
+}
+
 // ── 元数据缓存（song-cache.json）──
 let _metaSaveTimer = null;
 const _metaCacheFile = (ctx) => ctx.descriptor.directory + '/song-cache.json';
@@ -62,6 +90,7 @@ function persistMetaCache(ctx, songs, folderPaths) {
         source: sg.source, lyric: sg.lyric,
         // 内嵌封面是 blob URL，无法持久化；http(s) 在线封面很小，直接写入 JSON
         coverUrl: sg.coverUrl && /^https?:\/\//.test(sg.coverUrl) ? sg.coverUrl : '',
+        _coverFile: sg._coverFile || '',
         _noEmbed: !!sg._noEmbed,
         _mt: sg._mt, _path: sg._path, _folder: sg._folder, _alias: sg._alias,
       }));
@@ -256,7 +285,7 @@ function settingsPanel(ctx, state, log) {
         const label = path.split('/').filter(Boolean).pop() || '本地音乐';
         folders.value.push({ path, label, alias: '' });
         await saveSettings(ctx, { folders: folders.value.slice(), showTag: showTag.value, useKugouCover: useKugouCover.value });
-        try { const res = await ctx.fs.listFiles(path, { recursive: true, kinds: ['audio', 'lyric'] }); const c = res.ok ? res.files.filter((f) => f.kind === 'audio').length : 0; _counts[path] = c; if (res.ok) ctx.toast.success(`已添加 (${c} 首)`); else ctx.toast.warning(`失败: ${res.error}`); } catch { _counts[path] = 0; ctx.toast.warning('异常'); }
+        try { const res = await ctx.fs.listFiles(path, { recursive: true, kinds: ['audio', 'lyric'], limit: 10000 }); const c = res.ok ? res.files.filter((f) => f.kind === 'audio').length : 0; _counts[path] = c; if (res.ok) ctx.toast.success(`已添加 (${c} 首)`); else ctx.toast.warning(`失败: ${res.error}`); } catch { _counts[path] = 0; ctx.toast.warning('异常'); }
         state._tk = Date.now();
       };
       const confirmRm = async () => { if (!rmT.value) return; const p = rmT.value.path; folders.value = folders.value.filter((f) => f.path !== p); delete _counts[p]; showRm.value = false; rmT.value = null; await saveSettings(ctx, { folders: folders.value.slice(), showTag: showTag.value, useKugouCover: useKugouCover.value }); state._tk = Date.now(); ctx.toast.success('已移除'); };
@@ -439,7 +468,7 @@ function browserPage(ctx, state, log) {
         const lyricTasks = [];
         for (const f of s.folders) {
           try {
-            const r = await ctx.fs.listFiles(f.path, { recursive: true, kinds: ['audio', 'lyric'] });
+            const r = await ctx.fs.listFiles(f.path, { recursive: true, kinds: ['audio', 'lyric'], limit: 10000 });
             if (!r.ok) continue;
             const lb = f.label || f.path.split('/').filter(Boolean).pop() || '本地音乐';
             const alias = f.alias || lb;
@@ -486,11 +515,11 @@ function browserPage(ctx, state, log) {
                     if (id3.title) { sg.title = id3.title; sg.name = id3.title; changed = true; }
                     if (id3.artist) { sg.artist = id3.artist; changed = true; }
                     if (id3.album) { sg.album = id3.album; changed = true; }
-                    if (id3.coverUrl) { applyCover(sg, id3.coverUrl, sg._mt); changed = true; embedded = true; }
+                    if (id3.coverUrl) { await applyEmbeddedCover(ctx, sg, id3.coverUrl, sg._mt); changed = true; embedded = true; }
                     if (id3.lyric) { sg.lyric = id3.lyric; changed = true; embedded = true; }
                   } else {
                     const flac = parseFlacMeta(u8);
-                    if (flac.coverUrl) { applyCover(sg, flac.coverUrl, sg._mt); changed = true; embedded = true; }
+                    if (flac.coverUrl) { await applyEmbeddedCover(ctx, sg, flac.coverUrl, sg._mt); changed = true; embedded = true; }
                     if (flac.lyric) { sg.lyric = flac.lyric; changed = true; embedded = true; }
                   }
                 }
@@ -524,7 +553,9 @@ function browserPage(ctx, state, log) {
         songs.value = meta.songs; _songs = meta.songs;
         // 旧缓存可能没有 name 字段，补齐（播放栏标题读 name）
         songs.value.forEach(function (s) { if (s && !s.name && s.title) s.name = s.title; });
-        // 后台从音频文件自动解析封面
+        // 先用落盘封面缓存恢复封面（命中就不再读音频文件）
+        await Promise.all(songs.value.map((sg) => restoreCoverFile(ctx, sg)));
+        // 剩下没有封面的再从音频文件解析
         loadCoversBg();
         return true;
       }
@@ -542,6 +573,8 @@ function browserPage(ctx, state, log) {
           const batch = all.slice(i, i + batchSize);
           const results = await Promise.all(batch.map(async sg => {
             if (sg.coverUrl) return false;
+            // 已有落盘封面缓存 → 直接恢复，不读文件
+            if (sg._coverFile) { await restoreCoverFile(ctx, sg); if (sg.coverUrl) return false; }
             // 上次扫描已确认文件内无内嵌封面/歌词 → 跳过重复读取
             if (sg._noEmbed) return false;
             const cached = _coverCache.get(sg.id);
