@@ -13,6 +13,7 @@ function createLogger() {
 }
 
 const STORAGE_KEY = 'echo-local-simple-settings';
+const SORT_KEY = 'echo-local-simple-sort';
 const _counts = {}; let _seq = 0; let _songs = [];
 // 内存封面缓存（blob: / http(s) URL），跨页面导航持久化
 const _coverCache = new Map();
@@ -346,7 +347,19 @@ function browserPage(ctx, state, log) {
   return ctx.vue.defineComponent({
     setup() {
       const songs = ref([]), loading = ref(false);
-      const query = ref(''), sortBy = ref('name');
+      const query = ref('');
+      // 歌曲 / 歌手 / 专辑 各自独立的排序方式
+      const sorts = ref({ songs: 'name', artists: 'name', albums: 'name' });
+      // 恢复上次的排序方式（跨页面/重进保留）
+      Promise.resolve(ctx.storage.get(SORT_KEY)).then(function (v) {
+        if (v && typeof v === 'object' && !Array.isArray(v)) {
+          sorts.value = {
+            songs: v.songs || 'name',
+            artists: v.artists || 'name',
+            albums: v.albums || 'name',
+          };
+        }
+      }).catch(function () {});
       const showTag = ref(false);
       const filterFolder = ref('');
       const folderList = ref([]);
@@ -357,10 +370,15 @@ function browserPage(ctx, state, log) {
       const selectedGroup = ref(null); // { name, songs } 二级页面选中项
       const tabIndStyle = ref({});
       const ICON_BACK = '<path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z" fill="currentColor"/>';
+      // 当前 tab 的排序方式（读）；修改时按 tab 分别保存
+      const sortBy = computed(() => sorts.value[activeTab.value] || 'name');
+      function setSort(v) {
+        sorts.value = { ...sorts.value, [activeTab.value]: String(v) };
+        try { ctx.storage.set(SORT_KEY, sorts.value); } catch {}
+      }
       function switchTab(tab) {
         activeTab.value = tab;
         selectedGroup.value = null;
-        if (tab !== 'songs' && sortBy.value === 'time') sortBy.value = 'name';
         const idx = tab === 'songs' ? 0 : tab === 'artists' ? 1 : 2;
         tabIndStyle.value = { '--lg-tab-index': String(idx) };
       }
@@ -750,7 +768,7 @@ function browserPage(ctx, state, log) {
             ]),
             folderList.value.length > 1 && h(Sel, { options:folderOpts.value, modelValue:filterFolder.value, 'onUpdate:modelValue':(v)=>{filterFolder.value=String(v)}, clearable:false }),
             h('span', { style:'font-size:13px;color:var(--color-text-secondary);flex-shrink:0;' }, '排序：'),
-            h(Sel, { options:currentSortOpts.value, modelValue:sortBy.value, 'onUpdate:modelValue':(v)=>{sortBy.value=String(v)}, clearable:false }),
+            h(Sel, { options:currentSortOpts.value, modelValue:sortBy.value, 'onUpdate:modelValue':(v)=>{ setSort(v); }, clearable:false }),
             h('div', { style:'flex:1;' }),
             h('button', { onClick: locateCurrent, title: '定位当前播放', style: 'width:28px;height:28px;border-radius:8px;border:1px solid var(--border-subtle);background:var(--color-bg-elevated);color:var(--color-text-secondary);cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;' },
               h('svg', { viewBox: '0 0 24 24', width: 14, height: 14, innerHTML: ICON_LOCATE })
