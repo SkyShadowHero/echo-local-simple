@@ -124,6 +124,11 @@ return window.jsmediatags;
 }).call(window);
 
 const STORAGE_KEY = 'echo-local-simple-settings';
+/** 是否优先使用 Echo 自带的 fs.readAudioMetadata（设置项，默认开启）。 */
+let _useEchoApi = true;
+/** 诊断计数：本轮扫描中 Echo API 命中/未命中的歌曲数。 */
+let _echoApiHits = 0;
+let _echoApiMisses = 0;
 const SORT_KEY = 'echo-local-simple-sort';
 const _counts = {}; let _seq = 0; let _songs = [];
 // 内存封面缓存（blob: / http(s) URL），跨页面导航持久化
@@ -262,8 +267,22 @@ function parseFileName(name) {
   return { artist: '未知歌手', title: b || '未知歌曲' };
 }
 
-async function loadSettings(ctx) { const s = await ctx.storage.get(STORAGE_KEY); if (!s || typeof s !== 'object') return { folders: [], showTag: false, useKugouCover: false }; return { folders: Array.isArray(s.folders) ? s.folders : [], showTag: !!s.showTag, useKugouCover: !!s.useKugouCover }; }
-async function saveSettings(ctx, s) { await ctx.storage.set(STORAGE_KEY, s); }
+async function loadSettings(ctx) {
+  const s = await ctx.storage.get(STORAGE_KEY);
+  const base = { folders: [], showTag: false, useKugouCover: false, useEchoApi: true };
+  if (!s || typeof s !== 'object') return base;
+  return {
+    ...base,
+    folders: Array.isArray(s.folders) ? s.folders : [],
+    showTag: !!s.showTag,
+    useKugouCover: !!s.useKugouCover,
+    useEchoApi: s.useEchoApi !== false,
+  };
+}
+async function saveSettings(ctx, patch) {
+  const current = await loadSettings(ctx);
+  await ctx.storage.set(STORAGE_KEY, { ...current, ...patch });
+}
 
 /** 修正被当成 Latin-1 解码的 GBK/Big5/Shift-JIS 标签文本（老 MP3 常见 ID3v2 encoding=0 帧）。
  *  逐个编码试解，按「汉字数量 - 控制字符 - 替换符」打分，取最高分。 */
@@ -308,9 +327,37 @@ function fixTagEncoding(text) {
  * 解析交给 jsmediatags：MP3 走 ID3v1/v2，FLAC 走 VORBIS_COMMENT + PICTURE，
  * MP4/M4A 走 iTunes 原子，不再维护自写解析器。
  */
-async function readEmbeddedTags(ctx, filePath) {
-  const empty = { title: '', artist: '', album: '', coverUrl: '', lyric: '' };
+/** ID3v2 头里声明的大小超过实际缓冲时，jsmediatags 会越界读取并抛
+ *  “Offset N hasn't been loaded yet”；这种文件直接跳过，交给 Echo API 的文本结果。 */
+function tagSizeExceedsBuffer(u8) {
+  if (!u8 || u8.length < 10) return true;
+  if (u8[0] !== 0x49 || u8[1] !== 0x44 || u8[2] !== 0x33) return false;
+  const size =
+    ((u8[6] & 0x7f) << 21) | ((u8[7] & 0x7f) << 14) | ((u8[8] & 0x7f) << 7) | (u8[9] & 0x7f);
+  return size + 10 > u8.length;
+}
+
+async function readEmbeddedTags(ctx, filePath) {  const empty = { title: '', artist: '', album: '', coverUrl: '', lyric: '' };
   const toText = (v) => (typeof v === 'string' ? v.trim() : '');
+
+  // 优先走 Echo 自带 API（内部用 music-metadata，编码处理可靠）；封面/歌词仍由 jsmediatags 补齐。
+  let echoMeta = null;
+  if (_useEchoApi && ctx.fs && typeof ctx.fs.readAudioMetadata === 'function') {
+    try {
+      const meta = await ctx.fs.readAudioMetadata(filePath);
+      if (meta && meta.ok !== false) {
+        echoMeta = {
+          title: toText(meta.title),
+          artist: toText(meta.artist),
+          album: toText(meta.album),
+        };
+      }
+    } catch {}
+    if (_useEchoApi) {
+      if (echoMeta) _echoApiHits += 1;
+      else _echoApiMisses += 1;
+    }
+  }
 
   const readVia = (target) => new Promise((resolve) => {
     let settled = false;
@@ -332,21 +379,18 @@ async function readEmbeddedTags(ctx, filePath) {
   });
 
   let tags = null;
+  // 不再把 file:// / echo-plugin-media 地址交给 jsmediatags：它的 XhrFileReader 对 Range
+  // 响应处理不稳，遇到畸形标签会抛出 “Offset N hasn't been loaded yet”。统一读字节后走 Blob。
   try {
-    const urlResult = await ctx.fs.getFileUrl(filePath);
-    const url = urlResult && urlResult.ok ? urlResult.url : typeof urlResult === 'string' ? urlResult : '';
-    if (url) tags = await readVia(url);
-  } catch {}
-
-  // 自定义协议或 Range 不可用时，退回读取有限字节构造 Blob。
-  if (!tags) {
-    try {
-      const buf = await ctx.fs.readFileBytes(filePath, { maxBytes: 4 * 1024 * 1024 });
-      if (buf && buf.ok && buf.data) {
-        tags = await readVia(new File([new Uint8Array(buf.data)], 'audio', { type: 'application/octet-stream' }));
+    const buf = await ctx.fs.readFileBytes(filePath, { maxBytes: 4 * 1024 * 1024 });
+    // 截断的数据会让 jsmediatags 越界读取，直接放弃（标题等文本已由 Echo API 兜住）
+    if (buf && buf.ok && buf.data && !buf.truncated) {
+      const bytes = new Uint8Array(buf.data);
+      if (!tagSizeExceedsBuffer(bytes)) {
+        tags = await readVia(new File([bytes], 'audio', { type: 'application/octet-stream' }));
       }
-    } catch {}
-  }
+    }
+  } catch {}
   if (!tags) return empty;
 
   const out = { ...empty };
@@ -382,6 +426,12 @@ async function readEmbeddedTags(ctx, filePath) {
       out.coverUrl = URL.createObjectURL(new Blob([bytes], { type: pic.format || 'image/jpeg' }));
     } catch {}
   }
+  // Echo 自带 API 的文本结果更可靠（music-metadata 处理了编码），优先采用
+  if (echoMeta) {
+    if (echoMeta.title) out.title = echoMeta.title;
+    if (echoMeta.artist) out.artist = echoMeta.artist;
+    if (echoMeta.album) out.album = echoMeta.album;
+  }
   return out;
 }
 
@@ -404,8 +454,9 @@ function settingsPanel(ctx, state, log) {
       const folders = ref([]), showTag = ref(false);
       const showRm = ref(false), showEdit = ref(false), rmT = ref(null), editT = ref(null), aliasV = ref('');
       const useKugouCover = ref(false);
+      const useEchoApi = ref(true);
       const isMiuix = ref(document.documentElement.classList.contains('miuix-theme-active'));
-      loadSettings(ctx).then(s => { folders.value = s.folders; showTag.value = s.showTag; useKugouCover.value = !!s.useKugouCover; });
+      loadSettings(ctx).then(s => { folders.value = s.folders; showTag.value = s.showTag; useKugouCover.value = !!s.useKugouCover; useEchoApi.value = s.useEchoApi !== false; });
       const addFolder = async () => {
         const r = await ctx.dialog.selectDirectory({ title: '选择音乐文件夹' });
         if (r.canceled || !r.paths?.[0]) return;
@@ -422,6 +473,7 @@ function settingsPanel(ctx, state, log) {
       const openEdit = (f) => { editT.value = f; aliasV.value = f.alias || ''; showEdit.value = true; };
       const setShowTag = async (v) => { showTag.value = v; await saveSettings(ctx, { folders: folders.value.slice(), showTag: showTag.value, useKugouCover: useKugouCover.value }); state._tk = Date.now(); };
       const setKugou = async (v) => { useKugouCover.value = v; await saveSettings(ctx, { folders: folders.value.slice(), showTag: showTag.value, useKugouCover: useKugouCover.value }); };
+      const setEchoApi = async (v) => { useEchoApi.value = v; _useEchoApi = v; await saveSettings(ctx, { useEchoApi: v }); state._tk = Date.now(); };
       const _mc = isMiuix.value ? 'settings-card' : '';
       const _mi = isMiuix.value ? 'settings-item' : '';
       const _onBg = isMiuix.value ? 'var(--miuix-on-background)' : 'var(--color-text-main)';
@@ -441,6 +493,13 @@ function settingsPanel(ctx, state, log) {
               h('div', { style:'font-size:12px;color:' + _onSec + ';opacity:0.6;margin-top:2px;line-height:1.5' }, '通过酷狗搜索匹配歌曲封面和歌词'),
             ]),
             h(Sw, { modelValue: useKugouCover.value, 'onUpdate:modelValue': setKugou }),
+          ]),
+          h('div', { class:_mi, style:'display:flex;justify-content:space-between;align-items:center;gap:12px' + (isMiuix.value ? '' : ';padding:10px 14px') }, [
+            h('div', { style:'flex:1;min-width:0' }, [
+              h('div', { style:'font-weight:600;font-size:14px;color:' + _onBg + ';line-height:1.4' }, '使用 Echo API 读取元数据'),
+              h('div', { style:'font-size:12px;color:' + _onSec + ';opacity:0.6;margin-top:2px;line-height:1.5' }, '优先调用宿主 fs.readAudioMetadata（编码更可靠）；关闭则使用 jsmediatags 解析'),
+            ]),
+            h(Sw, { modelValue: useEchoApi.value, 'onUpdate:modelValue': setEchoApi }),
           ]),
           h('div', { class:_mi, style:'display:flex;justify-content:space-between;align-items:center;gap:12px' + (isMiuix.value ? '' : ';padding:10px 14px') }, [
             h('div', { style:'flex:1;min-width:0' }, [
@@ -585,16 +644,41 @@ function browserPage(ctx, state, log) {
       });
 
       const scan = async (silent) => {
+        // 接入宿主任务中心：一次刷新 = 一个任务，支持进度与取消
+        let task = null;
+        try {
+          task = ctx.tasks?.register?.({
+            id: `${ctx.id}:refresh-library`,
+            name: '刷新本地音乐',
+            status: 'running',
+            retention: 'transient',
+            progress: { done: 0, total: 100, percent: 0, label: '准备中' },
+          }) || null;
+        } catch {}
+        const setProgress = (percent, label) => {
+          try {
+            task?.update({ progress: { done: Math.round(percent), total: 100, percent: Math.round(percent), label } });
+          } catch {}
+        };
+        const aborted = () => !!task?.signal?.aborted;
+        const finishTask = (state, label, error) => {
+          try {
+            if (state === 'completed') task?.finish('completed', { progress: { done: 100, total: 100, percent: 100, label } });
+            else task?.finish(state, error ? { error } : undefined);
+          } catch {}
+        };
         const s = await loadSettings(ctx);
         showTag.value = s.showTag;
-        if (!s.folders?.length) { songs.value = []; loading.value = false; folderList.value = []; return; }
+        if (!s.folders?.length) { songs.value = []; loading.value = false; folderList.value = []; finishTask('error', '', '未添加音乐文件夹'); return; }
         if (!silent) loading.value = true;
+        setProgress(10, '读取文件列表');
         folderList.value = s.folders.map((f) => ({ path: f.path, label: f.label, alias: f.alias || '' }));
         // 从已有数据恢复封面 URL（避免重复获取）
         const prevCovers = new Map();
         for (const es of songs.value) { if (es.coverUrl) prevCovers.set(es._path, es.coverUrl); }
         const all = [];
         const lyricTasks = [];
+        let folderDone = 0;
         for (const f of s.folders) {
           try {
             const r = await ctx.fs.listFiles(f.path, { recursive: true, kinds: ['audio', 'lyric'], limit: 10000 });
@@ -615,11 +699,15 @@ function browserPage(ctx, state, log) {
               all.push(sg);
             }
             _counts[f.path] = af.length;
+            folderDone += 1;
+            setProgress(10 + (50 * folderDone) / Math.max(1, s.folders.length), `已读取 ${all.length} 首`);
           } catch {}
+          if (aborted()) { finishTask('aborted'); return; }
         }
         // 等待歌词读取与 SHA-256 hash 计算完成
         await Promise.all([...lyricTasks, ...all.map(sg => sg._hashPromise.then(h => { sg.hash = h; delete sg._hashPromise; }))]);
         songs.value = all; _songs = all; loading.value = false;
+        setProgress(60, '解析标签与封面');
         if (!silent && all.length) ctx.toast.success(`共 ${all.length} 首`);
         scanPhase.value = '';
 
@@ -629,6 +717,7 @@ function browserPage(ctx, state, log) {
           scanStatus.value = '解析标签与封面中...';
           const BATCH = 6;
           for (let i = 0; i < all.length; i += BATCH) {
+            if (aborted()) { task?.finish('aborted'); return; }
             const batch = all.slice(i, i + BATCH);
             const changedFlags = await Promise.all(batch.map(async (sg) => {
               let changed = false, embedded = false;
@@ -645,15 +734,24 @@ function browserPage(ctx, state, log) {
               return changed;
             }));
             scanStatus.value = `解析标签与封面中 ${Math.min(i + BATCH, all.length)}/${all.length}`;
+            setProgress(60 + (40 * Math.min(i + BATCH, all.length)) / Math.max(1, all.length), `解析 ${Math.min(i + BATCH, all.length)}/${all.length}`);
             if (changedFlags.some(Boolean)) songs.value = songs.value.slice();
           }
           songs.value = songs.value.slice();
-          log.info('元数据完成: ' + all.length);
+          log.info(`元数据完成: ${all.length}；Echo API 命中 ${_echoApiHits}，未命中 ${_echoApiMisses}`);
+          if (_useEchoApi && _echoApiHits + _echoApiMisses > 0) {
+            ctx.toast.info(`元数据来源：Echo API ${_echoApiHits} 首，内置解析 ${_echoApiMisses} 首`);
+          }
+          _echoApiHits = 0;
+          _echoApiMisses = 0;
           // 更新缓存（元数据 + _noEmbed 标记）
           persistMetaCache(ctx, all, s.folders);
           scanPhase.value = '';
           scanStatus.value = '';
-        })();
+          finishTask('completed', `共 ${all.length} 首`);
+        })().catch((error) => {
+          finishTask('error', '', String(error?.message || error));
+        });
       };
 
       // ── 从缓存恢复 ──
@@ -898,7 +996,10 @@ function browserPage(ctx, state, log) {
                 scanStatus.value && !loading.value && h('span', { style: 'opacity:0.7;' }, '· ' + scanStatus.value),
               ]),
             ]),
-            h('div', { style: 'display:flex;gap:6px;flex-shrink:0;' }, [
+            h('div', { style: 'display:flex;gap:6px;flex-shrink:0;align-items:center;' }, [
+              folderList.value.length > 0 && h('div', { style:'width:150px;flex-shrink:0;' },
+                h(Sel, { options:folderOpts.value, modelValue:filterFolder.value, 'onUpdate:modelValue':(v)=>{ filterFolder.value=String(v ?? '') }, clearable:false })
+              ),
               h(Btn, { onClick: refresh, size:'xs', variant:'outline' }, { default:()=>'刷新' }),
               h(Btn, { onClick: playAll, size:'xs', style:'--btn-bg:var(--color-primary);color:white;' }, { default:()=>'播放全部' }),
               h(Btn, { onClick: openSettings, size:'xs', variant:'outline' }, { default:()=>'管理文件夹' }),
@@ -910,7 +1011,6 @@ function browserPage(ctx, state, log) {
               h('input', { type:'text', placeholder:'搜索歌曲...', value:query.value, onInput:(e)=>{query.value=e.target.value}, style:'width:100%;padding:7px 12px 7px 34px;border-radius:10px;border:none;background:var(--bg-info-card);font-size:13px;outline:none;color:var(--color-text-main);box-sizing:border-box;' }),
               h('span', { style:'position:absolute;left:10px;top:50%;transform:translateY(-50%);pointer-events:none;display:flex;color:var(--color-text-secondary);', innerHTML:'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16.5 16.5L21 21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>' }),
             ]),
-            folderList.value.length > 1 && h(Sel, { options:folderOpts.value, modelValue:filterFolder.value, 'onUpdate:modelValue':(v)=>{filterFolder.value=String(v)}, clearable:false }),
             h('span', { style:'font-size:13px;color:var(--color-text-secondary);flex-shrink:0;' }, '排序：'),
             h(Sel, { options:currentSortOpts.value, modelValue:sortBy.value, 'onUpdate:modelValue':(v)=>{ setSort(v); }, clearable:false }),
             h('div', { style:'flex:1;' }),
@@ -967,6 +1067,27 @@ function browserPage(ctx, state, log) {
 export async function activate(ctx) {
   const log = createLogger();
   log.info('启动');
+  try {
+    const startupSettings = await loadSettings(ctx);
+    _useEchoApi = startupSettings.useEchoApi !== false;
+  } catch {}
+
+  // jsmediatags 遇到损坏/截断的标签会抛出 “Offset N hasn't been loaded yet”，
+  // 属于解析器越界读取而非插件崩溃，吞掉它以免触发宿主「插件运行异常」弹窗。
+  const swallowMediaTagError = (event) => {
+    const message = String(
+      event?.message || event?.reason?.message || event?.error?.message || event?.reason || '',
+    );
+    if (!/hasn't been loaded yet/i.test(message)) return;
+    event.preventDefault?.();
+    event.stopImmediatePropagation?.();
+  };
+  window.addEventListener('error', swallowMediaTagError, true);
+  window.addEventListener('unhandledrejection', swallowMediaTagError, true);
+  ctx.dispose(() => {
+    window.removeEventListener('error', swallowMediaTagError, true);
+    window.removeEventListener('unhandledrejection', swallowMediaTagError, true);
+  });
   ctx.player.audioSource.register({ id: 'local-simple-resolver', match: (c) => c.track.source === 'local-music', resolve: (c) => c.track.audioUrl || null });
   // 拦截歌词请求：本地音乐直接返回本地歌词
   ctx.lyrics.registerResolver({
