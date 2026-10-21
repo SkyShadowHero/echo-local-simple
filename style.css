@@ -210,6 +210,24 @@
   text-overflow: ellipsis;
 }
 
+/* ---- 时长：右对齐固定列，等宽数字，未知时留空占位 ---- */
+.local-duration {
+  flex: 0 0 44px;
+  width: 44px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+  opacity: 0.75;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.local-row.is-active .local-duration {
+  color: var(--color-primary);
+  opacity: 0.8;
+}
+
 /* ── Tab 行 ── */
 /* 默认：简单文字 tab，自动计算宽度居中（CSS 伪元素，不依赖 JS） */
 .local-tab-root {

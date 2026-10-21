@@ -204,6 +204,8 @@ function persistMetaCache(ctx, songs, folderPaths) {
         id: sg.id, title: sg.title, name: sg.name, artist: sg.artist, album: sg.album,
         audioUrl: sg.audioUrl, hash: sg.hash, mixSongId: sg.mixSongId,
         source: sg.source, lyric: sg.lyric,
+        // 时长（秒）：旧缓存没有这个字段，读出来是 undefined，按 0 处理
+        duration: Number(sg.duration) > 0 ? Number(sg.duration) : 0,
         // 内嵌封面是 blob URL，无法持久化；http(s) 在线封面很小，直接写入 JSON
         coverUrl: sg.coverUrl && /^https?:\/\//.test(sg.coverUrl) ? sg.coverUrl : '',
         _coverFile: sg._coverFile || '',
@@ -265,6 +267,18 @@ function parseFileName(name) {
   const b = (name.lastIndexOf('.') > 0 ? name.slice(0, name.lastIndexOf('.')) : name).replace(/^\d+\s*[.\-——]\s*/, '').trim();
   for (const s of [' - ', ' – ', ' — ']) { const i = b.indexOf(s); if (i > 0) { const a = b.slice(0, i).trim(), t = b.slice(i + s.length).trim(); if (a && t) return { artist: a, title: t }; } }
   return { artist: '未知歌手', title: b || '未知歌曲' };
+}
+
+/** 秒 → 3:45 / 1:02:03；未知时长返回空串（不占位显丑） */
+function formatDuration(value) {
+  let total = Math.round(Number(value) || 0);
+  if (!(total > 0)) return '';
+  const h = Math.floor(total / 3600);
+  total %= 3600;
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
+  return `${h > 0 ? h + ':' : ''}${mm}:${String(s).padStart(2, '0')}`;
 }
 
 async function loadSettings(ctx) {
@@ -337,7 +351,315 @@ function tagSizeExceedsBuffer(u8) {
   return size + 10 > u8.length;
 }
 
-async function readEmbeddedTags(ctx, filePath) {  const empty = { title: '', artist: '', album: '', coverUrl: '', lyric: '' };
+// ── 容器级别的时长解析：jsmediatags 只读标签、不读时长，
+//    所以在「不用 Echo API」的模式下，自己从文件头里把时长算出来 ──
+const MP3_BITRATES = {
+  '1-1': [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
+  '1-2': [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
+  '1-3': [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+  '2-1': [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
+  '2-2': [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+  '2-3': [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+};
+
+function readU32(b, p) {
+  return ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0;
+}
+function readAscii(b, p, n) {
+  let s = '';
+  for (let i = 0; i < n; i++) {
+    const c = b[p + i];
+    if (c === undefined) return '';
+    s += String.fromCharCode(c);
+  }
+  return s;
+}
+
+function mp3FrameHeader(b, p) {
+  if (b[p] !== 0xff || (b[p + 1] & 0xe0) !== 0xe0) return null;
+  const verBits = (b[p + 1] >> 3) & 3;
+  const layerBits = (b[p + 1] >> 1) & 3;
+  const brIdx = (b[p + 2] >> 4) & 0xf;
+  const srIdx = (b[p + 2] >> 2) & 3;
+  const chMode = (b[p + 3] >> 6) & 3;
+  const version = verBits === 3 ? 1 : verBits === 2 ? 2 : verBits === 0 ? 25 : 0;
+  const layer = layerBits === 1 ? 3 : layerBits === 2 ? 2 : layerBits === 3 ? 1 : 0;
+  if (!version || !layer || srIdx === 3 || brIdx === 0 || brIdx === 15) return null;
+  const rates = { 1: [44100, 48000, 32000], 2: [22050, 24000, 16000], 25: [11025, 12000, 8000] }[version];
+  const sampleRate = rates[srIdx];
+  const bitrate = (MP3_BITRATES[(version === 1 ? '1' : '2') + '-' + layer] || [])[brIdx] || 0;
+  if (!bitrate) return null;
+  const samplesPerFrame = layer === 1 ? 384 : layer === 2 ? 1152 : version === 1 ? 1152 : 576;
+  return { version, sampleRate, bitrate, samplesPerFrame, mono: chMode === 3 };
+}
+
+function mp3Duration(bytes, fileSize) {
+  if (!bytes || bytes.length < 4) return 0;
+  let start = 0;
+  if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+    const sz = ((bytes[6] & 0x7f) << 21) | ((bytes[7] & 0x7f) << 14) | ((bytes[8] & 0x7f) << 7) | (bytes[9] & 0x7f);
+    start = 10 + sz + (bytes[5] & 0x10 ? 10 : 0);
+  }
+  let p = Math.max(0, Math.min(start, bytes.length - 4));
+  while (p + 4 <= bytes.length && !(bytes[p] === 0xff && (bytes[p + 1] & 0xe0) === 0xe0)) p++;
+  const h = mp3FrameHeader(bytes, p);
+  if (!h) return 0;
+  // 帧数写在 Xing/Info 头里（VBR 也会写），有就直接用
+  const side = h.version === 1 ? (h.mono ? 17 : 32) : (h.mono ? 9 : 17);
+  const x = p + 4 + side;
+  if (x + 8 <= bytes.length) {
+    const tag = readAscii(bytes, x, 4);
+    if (tag === 'Xing' || tag === 'Info') {
+      const flags = readU32(bytes, x + 4);
+      if (flags & 1) {
+        const frames = readU32(bytes, x + 8);
+        if (frames > 0) return (frames * h.samplesPerFrame) / h.sampleRate;
+      }
+    }
+  }
+  // 没有 Xing 头就按 CBR 估算：字节数 ÷ 码率
+  const audioBytes = Math.max(0, (Number(fileSize) || bytes.length) - start);
+  return audioBytes > 0 ? (audioBytes * 8) / (h.bitrate * 1000) : 0;
+}
+
+function flacDuration(bytes) {
+  if (!bytes || bytes.length < 42) return 0;
+  if (readAscii(bytes, 0, 4) !== 'fLaC') return 0;
+  let pos = 4;
+  while (pos + 4 <= bytes.length) {
+    const last = bytes[pos] & 0x80;
+    const type = bytes[pos] & 0x7f;
+    const len = (bytes[pos + 1] << 16) | (bytes[pos + 2] << 8) | bytes[pos + 3];
+    if (type === 0) {
+      const b = pos + 4;
+      if (b + 18 > bytes.length) return 0;
+      const rate = (bytes[b + 10] << 12) | (bytes[b + 11] << 4) | (bytes[b + 12] >> 4);
+      const total =
+        (bytes[b + 13] & 0x0f) * 0x100000000 +
+        bytes[b + 14] * 0x1000000 +
+        bytes[b + 15] * 0x10000 +
+        bytes[b + 16] * 0x100 +
+        bytes[b + 17];
+      return rate > 0 && total > 0 ? total / rate : 0;
+    }
+    pos += 4 + len;
+    if (last) break;
+  }
+  return 0;
+}
+
+function mp4FindBox(bytes, start, end, type) {
+  let p = start;
+  while (p + 8 <= end) {
+    let size = readU32(bytes, p);
+    const name = readAscii(bytes, p + 4, 4);
+    let header = 8;
+    if (size === 1 && p + 16 <= end) {
+      size = readU32(bytes, p + 8) * 0x100000000 + readU32(bytes, p + 12);
+      header = 16;
+    } else if (size === 0) {
+      size = end - p;
+    }
+    if (size < header) return null;
+    if (name === type) return { start: p + header, end: Math.min(p + size, end) };
+    p += size;
+  }
+  return null;
+}
+
+function mp4MvhdSeconds(bytes, p, end) {
+  if (p + 20 > end) return 0;
+  if (bytes[p] === 1) {
+    if (p + 32 > end) return 0;
+    const timescale = readU32(bytes, p + 20);
+    const duration = readU32(bytes, p + 24) * 0x100000000 + readU32(bytes, p + 28);
+    return timescale > 0 ? duration / timescale : 0;
+  }
+  const timescale = readU32(bytes, p + 12);
+  const duration = readU32(bytes, p + 16);
+  return timescale > 0 ? duration / timescale : 0;
+}
+
+function mp4Duration(bytes) {
+  if (!bytes || bytes.length < 16) return 0;
+  const moov = mp4FindBox(bytes, 0, bytes.length, 'moov');
+  if (!moov) return 0;
+  const mvhd = mp4FindBox(bytes, moov.start, moov.end, 'mvhd');
+  return mvhd ? mp4MvhdSeconds(bytes, mvhd.start, mvhd.end) : 0;
+}
+
+/** moov 在文件尾部（iTunes 常见）时，用读到的尾部缓冲再找一次 */
+function mp4DurationFromTail(tail) {
+  if (!tail || tail.length < 16) return 0;
+  for (let i = 4; i + 8 <= tail.length; i++) {
+    if (tail[i] !== 0x6d || tail[i + 1] !== 0x6f || tail[i + 2] !== 0x6f || tail[i + 3] !== 0x76) continue;
+    const size = readU32(tail, i - 4);
+    const start = i + 4;
+    const end = size >= 8 ? Math.min(i - 4 + size, tail.length) : tail.length;
+    const mvhd = mp4FindBox(tail, start, end, 'mvhd');
+    if (mvhd) {
+      const d = mp4MvhdSeconds(tail, mvhd.start, mvhd.end);
+      if (d > 0) return d;
+    }
+  }
+  return 0;
+}
+
+function wavDuration(bytes) {
+  if (!bytes || bytes.length < 44) return 0;
+  if (readAscii(bytes, 0, 4) !== 'RIFF' || readAscii(bytes, 8, 4) !== 'WAVE') return 0;
+  let p = 12;
+  let byteRate = 0;
+  let dataSize = 0;
+  while (p + 8 <= bytes.length) {
+    const id = readAscii(bytes, p, 4);
+    const size = readU32(bytes, p + 4);
+    if (id === 'fmt ' && p + 20 <= bytes.length) byteRate = readU32(bytes, p + 16);
+    if (id === 'data') { dataSize = size; break; }
+    p += 8 + size + (size & 1);
+  }
+  return byteRate > 0 && dataSize > 0 ? dataSize / byteRate : 0;
+}
+
+/** 按扩展名（必要时按文件头）算时长，秒；失败返回 0 */
+function parseAudioDuration(bytes, filePath, fileSize) {
+  try {
+    const ext = (String(filePath || '').match(/\.([a-z0-9]+)$/i)?.[1] || '').toLowerCase();
+    let d = 0;
+    if (ext === 'flac') d = flacDuration(bytes);
+    else if (ext === 'm4a' || ext === 'mp4' || ext === 'm4b') d = mp4Duration(bytes);
+    else if (ext === 'wav') d = wavDuration(bytes);
+    else if (ext === 'mp3' || ext === 'mp2') d = mp3Duration(bytes, fileSize);
+
+    if (!(d > 0)) {
+      const head = readAscii(bytes, 0, 4);
+      if (head === 'fLaC') d = flacDuration(bytes);
+      else if (readAscii(bytes, 4, 4) === 'ftyp') d = mp4Duration(bytes);
+      else if (head === 'RIFF') d = wavDuration(bytes);
+      else if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) d = mp3Duration(bytes, fileSize);
+    }
+    return d > 0 && d < 86400 ? d : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// ── ID3v2 SYLT（同步歌词）：jsmediatags 只认 USLT，这个帧得自己解，
+//    解出来直接拼成标准 LRC 文本，交给宿主歌词面板 ──
+function id3TextDecoder(enc) {
+  try {
+    if (enc === 1) return new TextDecoder('utf-16'); // 带 BOM
+    if (enc === 2) return new TextDecoder('utf-16be');
+    if (enc === 3) return new TextDecoder('utf-8');
+    return new TextDecoder('latin1');
+  } catch {
+    return new TextDecoder();
+  }
+}
+
+/** 读一个 null 结尾字符串；UTF-16 用双字节 00 00 结尾 */
+function readId3Terminated(bytes, from, enc) {
+  if (enc === 1 || enc === 2) {
+    let p = from;
+    while (p + 1 < bytes.length) {
+      if (bytes[p] === 0 && bytes[p + 1] === 0) return { start: from, stop: p, next: p + 2 };
+      p += 2;
+    }
+    return { start: from, stop: bytes.length, next: bytes.length };
+  }
+  let p = from;
+  while (p < bytes.length && bytes[p] !== 0) p++;
+  return { start: from, stop: p, next: Math.min(bytes.length, p + 1) };
+}
+
+/** 在 ID3v2 标签里找指定帧（2.3 用大端长度，2.4 用 syncsafe） */
+function readId3v2Frame(bytes, wanted) {
+  if (!bytes || bytes.length < 10) return null;
+  if (bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) return null;
+  const major = bytes[3];
+  const flags = bytes[5];
+  if (flags & 0x80) return null; // 整标签去同步，字节偏移不可信，直接放弃
+  const size = ((bytes[6] & 0x7f) << 21) | ((bytes[7] & 0x7f) << 14) | ((bytes[8] & 0x7f) << 7) | (bytes[9] & 0x7f);
+  let p = 10;
+  if (flags & 0x40) {
+    if (major === 4) {
+      p += ((bytes[10] & 0x7f) << 21) | ((bytes[11] & 0x7f) << 14) | ((bytes[12] & 0x7f) << 7) | (bytes[13] & 0x7f);
+    } else if (major === 3) {
+      p += 4 + readU32(bytes, 10);
+    }
+  }
+  const end = Math.min(bytes.length, 10 + size);
+  while (p + 10 <= end) {
+    const id = readAscii(bytes, p, 4);
+    if (!/^[A-Z0-9]{4}$/.test(id)) break;
+    const frameSize =
+      major === 4
+        ? ((bytes[p + 4] & 0x7f) << 21) | ((bytes[p + 5] & 0x7f) << 14) | ((bytes[p + 6] & 0x7f) << 7) | (bytes[p + 7] & 0x7f)
+        : readU32(bytes, p + 4);
+    if (frameSize <= 0 || p + 10 + frameSize > end) break;
+    if (id === wanted) {
+      return { major, start: p + 10, end: p + 10 + frameSize, flags: (bytes[p + 8] << 8) | bytes[p + 9] };
+    }
+    p += 10 + frameSize;
+  }
+  return null;
+}
+
+function formatLrcTime(ms) {
+  const total = Math.max(0, Math.round(ms));
+  const m = Math.floor(total / 60000);
+  const s = Math.floor((total % 60000) / 1000);
+  const cs = Math.floor((total % 1000) / 10);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+}
+
+function parseSyltFrame(bytes, frame, msPerFrame) {
+  const b = bytes.subarray(frame.start, frame.end);
+  if (b.length < 6) return '';
+  const enc = b[0];
+  const timeFormat = b[4]; // 1 = MPEG 帧数，2 = 毫秒
+  const dec = id3TextDecoder(enc);
+  let p = readId3Terminated(b, 6, enc).next; // 跳过内容描述
+  const lines = [];
+  while (p + 4 <= b.length) {
+    const text = readId3Terminated(b, p, enc);
+    if (text.next > b.length) break;
+    p = text.next;
+    if (p + 4 > b.length) break;
+    const raw = ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0;
+    p += 4;
+    const value = dec.decode(b.subarray(text.start, text.stop)).replace(/\u0000+$/g, '').trim();
+    if (!value) continue;
+    const ms = timeFormat === 1 ? raw * (msPerFrame > 0 ? msPerFrame : 26.12) : raw;
+    lines.push({ ms, value });
+  }
+  if (!lines.length) return '';
+  lines.sort((a, b2) => a.ms - b2.ms);
+  return lines.map((l) => `[${formatLrcTime(l.ms)}]${l.value}`).join('\n');
+}
+
+function parseSyltLyric(bytes) {
+  try {
+    const frame = readId3v2Frame(bytes, 'SYLT');
+    if (!frame) return '';
+    // timeFormat=1 时时间戳是「MPEG 帧序号」，用第一个音频帧算每帧毫秒
+    let msPerFrame = 0;
+    for (let i = 0; i + 4 < bytes.length && i < 8192; i++) {
+      if (bytes[i] === 0xff && (bytes[i + 1] & 0xe0) === 0xe0) {
+        const h = mp3FrameHeader(bytes, i);
+        if (h) {
+          msPerFrame = (h.samplesPerFrame / h.sampleRate) * 1000;
+          break;
+        }
+      }
+    }
+    return parseSyltFrame(bytes, frame, msPerFrame);
+  } catch {
+    return '';
+  }
+}
+
+async function readEmbeddedTags(ctx, filePath) {  const empty = { title: '', artist: '', album: '', coverUrl: '', lyric: '', duration: 0 };
   const toText = (v) => (typeof v === 'string' ? v.trim() : '');
 
   // 优先走 Echo 自带 API（内部用 music-metadata，编码处理可靠）；封面/歌词仍由 jsmediatags 补齐。
@@ -350,6 +672,7 @@ async function readEmbeddedTags(ctx, filePath) {  const empty = { title: '', art
           title: toText(meta.title),
           artist: toText(meta.artist),
           album: toText(meta.album),
+          duration: Number(meta.duration) > 0 ? Number(meta.duration) : 0,
         };
       }
     } catch {}
@@ -379,19 +702,44 @@ async function readEmbeddedTags(ctx, filePath) {  const empty = { title: '', art
   });
 
   let tags = null;
+  let byteDuration = 0;
+  let syltLyric = '';
   // 不再把 file:// / echo-plugin-media 地址交给 jsmediatags：它的 XhrFileReader 对 Range
   // 响应处理不稳，遇到畸形标签会抛出 “Offset N hasn't been loaded yet”。统一读字节后走 Blob。
   try {
     const buf = await ctx.fs.readFileBytes(filePath, { maxBytes: 4 * 1024 * 1024 });
-    // 截断的数据会让 jsmediatags 越界读取，直接放弃（标题等文本已由 Echo API 兜住）
-    if (buf && buf.ok && buf.data && !buf.truncated) {
+    if (buf && buf.ok && buf.data) {
       const bytes = new Uint8Array(buf.data);
-      if (!tagSizeExceedsBuffer(bytes)) {
+      // jsmediatags 本身只读标签、不读时长；这里从容器头里自己算一份兜底
+      byteDuration = parseAudioDuration(bytes, filePath, buf.size);
+      // jsmediatags 不解析 SYLT，自己解成 LRC（有 USLT 时后面不会覆盖）
+      syltLyric = parseSyltLyric(bytes);
+      // m4a 的 moov 常常在文件尾，头 4MB 里没有就再读一段尾部
+      if (!(byteDuration > 0) && buf.truncated && buf.size > 0 && /\.(m4a|mp4|m4b)$/i.test(filePath)) {
+        try {
+          const tailLen = Math.min(2 * 1024 * 1024, buf.size);
+          const tb = await ctx.fs.readFileBytes(filePath, { offset: buf.size - tailLen, maxBytes: tailLen });
+          if (tb && tb.ok && tb.data) byteDuration = mp4DurationFromTail(new Uint8Array(tb.data));
+        } catch {}
+      }
+      // 截断的数据会让 jsmediatags 越界读取，直接放弃（标题等文本已由 Echo API 兜住）
+      if (!buf.truncated && !tagSizeExceedsBuffer(bytes)) {
         tags = await readVia(new File([bytes], 'audio', { type: 'application/octet-stream' }));
       }
     }
   } catch {}
-  if (!tags) return empty;
+  if (!tags) {
+    // jsmediatags 解析失败也别把 Echo API / 容器头已经拿到的文本和时长丢掉
+    if (!echoMeta && !(byteDuration > 0) && !syltLyric) return empty;
+    return {
+      ...empty,
+      title: echoMeta?.title || '',
+      artist: echoMeta?.artist || '',
+      album: echoMeta?.album || '',
+      duration: echoMeta?.duration || byteDuration || 0,
+      lyric: syltLyric,
+    };
+  }
 
   const out = { ...empty };
   out.title = fixTagEncoding(toText(tags.title));
@@ -418,6 +766,8 @@ async function readEmbeddedTags(ctx, filePath) {  const empty = { title: '', art
     const bad = (out.lyric.match(/\uFFFD/g) || []).length;
     if (bad > out.lyric.length * 0.2) out.lyric = '';
   }
+  // USLT / Vorbis 注释 / ©lyr 都没有时，用 SYLT 解出来的 LRC 顶上
+  if (!out.lyric && syltLyric) out.lyric = syltLyric;
 
   const pic = tags.picture;
   if (pic && pic.data && pic.data.length > 256) {
@@ -431,7 +781,9 @@ async function readEmbeddedTags(ctx, filePath) {  const empty = { title: '', art
     if (echoMeta.title) out.title = echoMeta.title;
     if (echoMeta.artist) out.artist = echoMeta.artist;
     if (echoMeta.album) out.album = echoMeta.album;
+    if (echoMeta.duration) out.duration = echoMeta.duration;
   }
+  if (!(out.duration > 0) && byteDuration > 0) out.duration = byteDuration;
   return out;
 }
 
@@ -726,6 +1078,7 @@ function browserPage(ctx, state, log) {
                 if (tags.title) { sg.title = tags.title; sg.name = tags.title; changed = true; }
                 if (tags.artist) { sg.artist = tags.artist; changed = true; }
                 if (tags.album) { sg.album = tags.album; changed = true; }
+                if (tags.duration > 0) { sg.duration = tags.duration; changed = true; }
                 if (tags.coverUrl) { await applyEmbeddedCover(ctx, sg, tags.coverUrl, sg._mt); changed = true; embedded = true; }
                 if (tags.lyric) { sg.lyric = tags.lyric; changed = true; embedded = true; }
               } catch {}
@@ -777,9 +1130,43 @@ function browserPage(ctx, state, log) {
         });
         // 先用落盘封面缓存恢复封面（命中就不再读音频文件）
         await Promise.all(songs.value.map((sg) => restoreCoverFile(ctx, sg)));
-        // 剩下没有封面的再从音频文件解析
+        // 剩下没有封面的再从音频文件解析；时长并行补，先让列表把时长显示出来
         loadCoversBg();
+        fillDurationsBg();
         return true;
+      }
+
+      // ── 后台补时长：老缓存没有 duration 字段，读一遍并写回缓存。
+      //    Echo API 可用就用它；关闭时退回 readEmbeddedTags 里的容器头解析 ──
+      async function fillDurationsBg() {
+        if (!ctx.fs) return;
+        const todo = songs.value.filter((s) => s && s._path && !(Number(s.duration) > 0));
+        if (!todo.length) return;
+        let cursor = 0, changed = false;
+        const worker = async () => {
+          while (cursor < todo.length) {
+            const sg = todo[cursor++];
+            let d = 0;
+            if (_useEchoApi && typeof ctx.fs.readAudioMetadata === 'function') {
+              try {
+                const meta = await ctx.fs.readAudioMetadata(sg._path);
+                d = Number(meta?.duration) || 0;
+              } catch {}
+            }
+            if (!(d > 0)) {
+              try {
+                const tags = await readEmbeddedTags(ctx, sg._path);
+                d = Number(tags?.duration) || 0;
+              } catch {}
+            }
+            if (d > 0) { sg.duration = d; changed = true; }
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(4, todo.length) }, () => worker()));
+        if (changed) {
+          songs.value = songs.value.slice();
+          try { const s = await loadSettings(ctx); persistMetaCache(ctx, songs.value, s.folders); } catch {}
+        }
       }
 
       // ── 后台解析封面（从音频文件 ID3/FLAC 标签自动读取）──
@@ -804,6 +1191,7 @@ function browserPage(ctx, state, log) {
             try {
               const tags = await readEmbeddedTags(ctx, sg._path);
               if (tags.lyric && !sg.lyric) { sg.lyric = tags.lyric; metaDirty = true; }
+              if (tags.duration > 0 && !(Number(sg.duration) > 0)) { sg.duration = tags.duration; metaDirty = true; }
               const cover = tags.coverUrl || '';
               if (cover) {
                 applyCover(sg, cover, sg._mt);
@@ -932,9 +1320,10 @@ function browserPage(ctx, state, log) {
                   h('span',{class:'local-song-artist'},sg.artist),
                 ]),
               ]),
-              hasLyric && h('span',{class:'local-tag-lyric'},'词'),
               sg.album && sg.album !== sg._alias && h('span',{class:'local-tag-album'},sg.album),
               showTag.value && sg._alias && h('span',{class:'local-tag-alias'},sg._alias),
+              hasLyric && h('span',{class:'local-tag-lyric'},'词'),
+              h('span', { class: 'local-duration' }, formatDuration(sg.duration)),
               h('span',{style:'width:16px;flex-shrink:0;'}),
             ]),
           ]);
