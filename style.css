@@ -339,9 +339,10 @@
 .local-back-top {
   position: absolute;
   right: 24px;
-  /* 与悬浮底栏统一：跟随宿主发布的底栏高度（--drawer-bottom-offset = 底栏高度 + 8）再加间距，
-     避免回顶按钮被底部播放控件遮挡 */
-  bottom: calc(var(--drawer-bottom-offset, 96px) + 24px);
+  /* 播放栏在正常流里（.player-bar-container 是 shrink-0），页面容器本身就结束在
+     播放栏上沿；再减 --drawer-bottom-offset（底栏高度 + 8）等于让出两遍，
+     按钮会飘到半空。这里直接按页面内边距定位，离底边 12px。 */
+  bottom: 12px;
   z-index: 1200;
   padding: 12px;
   border-radius: 50%;
